@@ -1,0 +1,73 @@
+name: "Suwayomi Server"
+description: "Unofficial Suwayomi Server repackaging for Home Assistant, with ingress and configurable storage"
+version: "0.1.2"
+slug: "suwayomi"
+url: "https://github.com/devnagui/Suwayomi-Server-HA"
+arch:
+  - aarch64
+  - amd64
+image: "ghcr.io/devnagui/suwayomi-server-ha/suwayomi-{arch}"
+init: false
+boot: manual
+backup: cold
+timeout: 120
+ingress: true
+ingress_port: 8080
+ingress_stream: true
+panel_icon: "mdi:book-open-page-variant"
+panel_title: "Suwayomi"
+ports:
+  4567/tcp: null
+ports_description:
+  4567/tcp: "Optional authenticated HTTP API/WebUI; use a TLS reverse proxy for Internet access"
+map:
+  - media:rw
+options:
+  auth_username: "suwayomi"
+  auth_password: ""
+  direct_access_enabled: false
+  jvm_heap_mb: 768
+  storage_path: "/data/server"
+  downloads_path: ""
+  backup_path: ""
+  local_source_path: ""
+  extension_stores: []
+  download_as_cbz: true
+  max_sources_in_parallel: 2
+  global_update_interval: 12
+  backup_time: "00:00"
+  backup_interval: 1
+  backup_ttl: 14
+  debug_logs_enabled: false
+  flaresolverr_enabled: true
+  flaresolverr_url: "http://db21ed7f-flaresolverr:8191"
+  flaresolverr_timeout: 60
+  flaresolverr_session_name: "suwayomi"
+  flaresolverr_session_ttl: 15
+  flaresolverr_as_response_fallback: false
+  advanced_server_settings: "{}"
+schema:
+  auth_username: "str"
+  auth_password: "password"
+  direct_access_enabled: "bool"
+  jvm_heap_mb: "int(256,1536)"
+  storage_path: "str"
+  downloads_path: "str"
+  backup_path: "str"
+  local_source_path: "str"
+  extension_stores:
+    - "url"
+  download_as_cbz: "bool"
+  max_sources_in_parallel: "int(1,64)"
+  global_update_interval: "float(0,)"
+  backup_time: "match(^([01][0-9]|2[0-3]):[0-5][0-9]$)"
+  backup_interval: "int(0,36500)"
+  backup_ttl: "int(0,36500)"
+  debug_logs_enabled: "bool"
+  flaresolverr_enabled: "bool"
+  flaresolverr_url: "url"
+  flaresolverr_timeout: "int(1,600)"
+  flaresolverr_session_name: "str"
+  flaresolverr_session_ttl: "int(0,525600)"
+  flaresolverr_as_response_fallback: "bool"
+  advanced_server_settings: "str"

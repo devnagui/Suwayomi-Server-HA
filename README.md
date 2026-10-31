@@ -1,0 +1,99 @@
+# Suwayomi Server for Home Assistant
+
+An **unofficial Home Assistant repackaging** of
+[Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server), with the upstream
+[Suwayomi WebUI](https://github.com/Suwayomi/Suwayomi-WebUI).
+The manga server and reader are Suwayomi's work; this repository supplies the
+Home Assistant app manifest, container build, ingress proxy, startup configuration,
+storage management and update/publish pipeline.
+
+This is **not the Android client**, a new manga engine, or an official Suwayomi
+or Home Assistant distribution. Mobile/desktop clients connect separately to
+the optional authenticated server API.
+
+## Features
+
+- Native, authenticated Home Assistant ingress with working assets, browser
+  routing, GraphQL and WebSockets.
+- AMD64 and ARM64/aarch64 images, including Raspberry Pi 4/5.
+- Configurable storage root: keep database, library, downloads, backups and
+  local manga in an app-specific folder on an existing mounted USB disk.
+- Reuse an existing FlareSolverr service; no second solver or Chromium is started.
+- Optional direct access, disabled and unmapped by default, with mandatory
+  authentication. Use an HTTPS reverse proxy before Internet exposure.
+- Versioned images built from a pinned upstream server commit and its matching
+  bundled WebUI, with daily upstream checks and automated tests before publication.
+
+## Install in Home Assistant
+
+Add this repository in **Settings → Apps → App store → Repositories**:
+
+```text
+https://github.com/devnagui/Suwayomi-Server-HA
+```
+
+Install **Suwayomi Server**, then read its
+[configuration and storage documentation](suwayomi/DOCS.md).
+Set a unique password and the existing FlareSolverr URL before starting.
+For USB storage, set `storage_path` to your mounted app folder, for example
+`/media/torrent_disk/suwayomi`. Leave the individual path overrides empty to
+keep everything under that root.
+
+Both architecture images for the app version must be published and publicly
+pullable from GHCR before Supervisor can install the package. The
+[GitHub Actions workflow](.github/workflows/suwayomi.yml) builds, tests and
+publishes them; check its latest successful run rather than assuming a source
+commit alone means the images are available.
+
+## Updating and contributing
+
+The GitHub pipeline checks upstream master daily at **04:15 UTC**. When it
+changes, the pipeline increments the HA patch version, builds and tests both
+architectures, then publishes both images and records the tested source/version
+update. Failed candidates are not offered as a new HA version. Released image
+versions are not silently overwritten.
+
+You can also use **Actions → Build and publish Suwayomi HA repackaging → Run
+workflow**. Keep `update_upstream` enabled to check the latest upstream source.
+No personal token, local compiler or running controller is needed by the
+scheduled workflow: it uses GitHub's scoped workflow token.
+
+**One-time setup:** GHCR creates new packages privately. In your GitHub profile's
+Packages tab, open each `suwayomi-server-ha/suwayomi-*` package, then
+**Package settings → Change visibility → Public**. GitHub currently has no
+supported API for this first visibility change. Later automated pushes retain
+the public setting. This is separate from the repository itself being public.
+
+The pipeline does not enable HA auto-updates, restart the installed app, repair
+FlareSolverr or change host networking. Upstream incompatibilities still need
+attention when the tests report a failure; the existing HA version remains
+unchanged.
+
+For a manual source update on a development machine,
+clone the upstream server beside this repository, or pass its checkout path:
+
+```powershell
+node .\scripts\update-suwayomi.cjs 0.1.3
+```
+
+The command fast-forwards a clean upstream checkout and updates the source pin
+and app version together. Changes to the manga server itself belong in
+[Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server); packaging,
+ingress and Home Assistant configuration changes belong here.
+
+See [DOCS.md](suwayomi/DOCS.md) for installation, USB backup/migration,
+authentication, local validation and release details.
+
+## Attribution and license
+
+Suwayomi-Server and Suwayomi WebUI are copyright their respective contributors.
+They are redistributed under the Mozilla Public License 2.0 with their notices
+and matching source links preserved. This repository's packaging code uses the
+same [MPL-2.0 license](LICENSE).
+
+The initial server source pin is
+[`6b481e8b62938b9c060eb210b934e0fbfdfa466b`](https://github.com/Suwayomi/Suwayomi-Server/tree/6b481e8b62938b9c060eb210b934e0fbfdfa466b)
+(server `v2.4.2435`, from upstream master/preview), with WebUI `r3518`.
+Exact source and UI provenance are recorded in each image's
+`/app/build-info.json`. This package does not bundle or endorse third-party
+extension stores or grant rights to manga content.

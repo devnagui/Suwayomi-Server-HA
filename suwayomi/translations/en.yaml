@@ -1,0 +1,68 @@
+configuration:
+  auth_username:
+    name: Suwayomi username
+    description: The server account shared by HA administrators and authenticated direct clients.
+  auth_password:
+    name: Suwayomi password
+    description: Required before startup; use a unique password of 12-256 characters.
+  direct_access_enabled:
+    name: Enable direct API and WebUI access
+    description: Also requires a Network port mapping. Keep off for ingress-only use; use HTTPS before Internet exposure.
+  jvm_heap_mb:
+    name: Maximum Java heap (MiB)
+    description: Not a whole-app RAM cap. The 768 MiB default leaves headroom for HA and the shared FlareSolverr.
+  storage_path:
+    name: Server storage root
+    description: Stores the database, library, settings and extension data. Set an app folder under an existing mounted USB volume, for example /media/torrent_disk/suwayomi. Changing this does not migrate old data.
+  downloads_path:
+    name: Manga downloads directory
+    description: Leave empty for downloads below the storage root, or override with an absolute /data or mounted /media path.
+  backup_path:
+    name: Suwayomi backups directory
+    description: Leave empty for backups below the storage root. USB storage is not included in an HA app backup; back it up separately.
+  local_source_path:
+    name: Local manga directory
+    description: Leave empty for local manga below the storage root, or override with an absolute /data or mounted /media path.
+  extension_stores:
+    name: Extension store index URLs
+    description: Full HTTP(S) index JSON URLs, not GitHub repository landing pages. No store is installed automatically.
+  download_as_cbz:
+    name: Download chapters as CBZ
+  max_sources_in_parallel:
+    name: Maximum concurrent sources
+    description: Two is recommended for the 4 GiB Pi.
+  global_update_interval:
+    name: Library update interval (hours)
+    description: Zero disables scheduled updates; per-user inclusion settings are managed in Suwayomi.
+  backup_time:
+    name: Automatic backup time
+    description: Daily time in HH:MM.
+  backup_interval:
+    name: Automatic backup interval (days)
+    description: Zero disables scheduled backups.
+  backup_ttl:
+    name: Automatic backup retention (days)
+    description: Zero disables automatic retention cleanup.
+  debug_logs_enabled:
+    name: Enable upstream debug logging
+    description: Leave off normally. Review logs privately; do not share account or source information.
+  flaresolverr_enabled:
+    name: Use external FlareSolverr
+    description: Reuses the existing HA service; does not launch another solver or browser.
+  flaresolverr_url:
+    name: Existing FlareSolverr URL
+    description: Use the internal service root URL without /v1. Set the hostname of your existing HA FlareSolverr app.
+  flaresolverr_timeout:
+    name: FlareSolverr timeout (seconds)
+  flaresolverr_session_name:
+    name: FlareSolverr session name
+    description: Use a dedicated name so Suwayomi does not share another application's browser session.
+  flaresolverr_session_ttl:
+    name: FlareSolverr session lifetime (minutes)
+  flaresolverr_as_response_fallback:
+    name: Use FlareSolverr as response fallback
+  advanced_server_settings:
+    name: Additional global server settings (JSON)
+    description: Current upstream names and JSON types. Unknown, deprecated and app-managed keys are rejected. Per-user settings belong in Suwayomi.
+network:
+  4567/tcp: Optional authenticated HTTP API and WebUI; put behind HTTPS for Internet access.
