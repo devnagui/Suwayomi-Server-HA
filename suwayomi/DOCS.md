@@ -26,6 +26,8 @@ pullable from `ghcr.io/devnagui/suwayomi-server-ha` before installation. Check
 the [build/publish workflow](../.github/workflows/suwayomi.yml) for a successful
 run for both architectures. The HA host pulls an image; it does not compile
 Kotlin/Gradle or run a second FlareSolverr browser.
+Release 0.1.2 passed the native two-architecture pipeline and both image
+manifests were verified anonymously readable from GHCR.
 
 ## Configurable storage, including USB
 
@@ -176,11 +178,12 @@ repository-scoped workflow token and does not require a local always-on machine.
 GitHub may disable scheduled runs after prolonged public-repository inactivity;
 reenable them in Actions if GitHub reports that condition.
 
-For **first publication only**, make both architecture packages public in
-GitHub's Packages settings. New GHCR packages default to private even when this
-repository is public; inheritance of repository permissions is not package
-visibility. GitHub has no supported API to automate this visibility switch.
-After the two packages are public, later automatic repackagings retain it.
+For forks/new package names, verify public pulls after first publication. If a
+package is private, make it public once in GitHub's Packages settings.
+Repository permission inheritance is not the same as package visibility, and
+GitHub has no supported API for that visibility switch. Once public, later
+automatic pushes retain it. Both initial packages in this repository are
+already publicly pullable for release 0.1.2.
 
 HA app installation/update is separate from GitHub publication. This workflow
 never enables Supervisor auto-update, restarts the live app, modifies the USB

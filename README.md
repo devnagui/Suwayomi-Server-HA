@@ -39,6 +39,10 @@ For USB storage, set `storage_path` to your mounted app folder, for example
 `/media/torrent_disk/suwayomi`. Leave the individual path overrides empty to
 keep everything under that root.
 
+[Release 0.1.2](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.2)
+has passed the native AMD64/ARM64 pipeline. Both architecture images were
+verified publicly pullable from GHCR without registry credentials.
+
 Both architecture images for the app version must be published and publicly
 pullable from GHCR before Supervisor can install the package. The
 [GitHub Actions workflow](.github/workflows/suwayomi.yml) builds, tests and
@@ -58,11 +62,13 @@ workflow**. Keep `update_upstream` enabled to check the latest upstream source.
 No personal token, local compiler or running controller is needed by the
 scheduled workflow: it uses GitHub's scoped workflow token.
 
-**One-time setup:** GHCR creates new packages privately. In your GitHub profile's
-Packages tab, open each `suwayomi-server-ha/suwayomi-*` package, then
-**Package settings → Change visibility → Public**. GitHub currently has no
-supported API for this first visibility change. Later automated pushes retain
-the public setting. This is separate from the repository itself being public.
+**For forks or new package names:** verify anonymous pulls after first
+publication. If GHCR created a package privately, open it in your GitHub
+profile's Packages tab, then use
+**Package settings → Change visibility → Public** once. GitHub currently has no
+supported API for that visibility change. Later pushes retain the public
+setting. This repository's two initial packages are already publicly pullable;
+no extra visibility setup is needed for release 0.1.2.
 
 The pipeline does not enable HA auto-updates, restart the installed app, repair
 FlareSolverr or change host networking. Upstream incompatibilities still need
