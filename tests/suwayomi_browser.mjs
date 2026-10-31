@@ -8,10 +8,14 @@ try {
         const credentials = index === 1
             ? Buffer.from(process.env.SUWAYOMI_TEST_AUTH, 'base64').toString('utf8').split(':')
             : null;
-        const context = await browser.newContext(credentials
-            ? { httpCredentials: { username: credentials[0], password: credentials.slice(1).join(':') } }
-            : {});
+        const context = await browser.newContext({
+            locale: 'en-US',
+            ...(credentials
+                ? { httpCredentials: { username: credentials[0], password: credentials.slice(1).join(':') } }
+                : {}),
+        });
         const page = await context.newPage();
+        assert.equal(await page.evaluate(() => navigator.language), 'en-US');
         const errors = [];
         const consoleErrors = [];
         const externalFonts = new Set();

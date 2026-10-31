@@ -16,6 +16,8 @@
   metadata/changelog/release updates. Do not overwrite existing released images.
 - Retry transient Docker startup connection resets only within the smoke-test
   readiness deadline; still fail explicitly when the app exits or never becomes ready.
+- Use an explicit BCP-47 browser-test locale instead of hosted runners' invalid
+  `en-US@posix` locale, while retaining all browser and asset error assertions.
 
 ## 0.1.1
 
