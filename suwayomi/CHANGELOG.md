@@ -14,6 +14,8 @@
 - Add a daily/manual GitHub upstream check with automatic patch versioning,
   shared source snapshots, both-architecture publication gates and tested
   metadata/changelog/release updates. Do not overwrite existing released images.
+- Retry transient Docker startup connection resets only within the smoke-test
+  readiness deadline; still fail explicitly when the app exits or never becomes ready.
 
 ## 0.1.1
 

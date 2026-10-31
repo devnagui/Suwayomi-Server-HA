@@ -33,6 +33,18 @@ def options():
 
 
 class SuwayomiTests(unittest.TestCase):
+    def test_smoke_readiness_handles_docker_startup_reset_without_masking_app_exit(self):
+        smoke_spec = importlib.util.spec_from_file_location("suwayomi_smoke", ROOT / "tests" / "suwayomi_smoke.py")
+        smoke = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke)
+        with patch.object(smoke, "docker", return_value="true"), patch.object(
+            smoke, "request", side_effect=[ConnectionResetError("not listening yet"), (200, b"ready")]
+        ), patch.object(smoke.time, "sleep"):
+            smoke.wait_for_app("test-app", "http://127.0.0.1/", 200, "test-only")
+        with patch.object(smoke, "docker", side_effect=["false", "explicit app failure"]):
+            with self.assertRaisesRegex(RuntimeError, "App exited"):
+                smoke.wait_for_app("test-app", "http://127.0.0.1/", 200, "test-only")
+
     def test_python_sources_parse(self):
         for name in ("run.py", "build_source.py"):
             ast.parse((APP / name).read_text(encoding="utf-8"))

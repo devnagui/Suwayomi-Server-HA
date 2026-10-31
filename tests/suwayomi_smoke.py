@@ -1,6 +1,5 @@
 import argparse
 import base64
-import http.client
 import json
 import os
 import secrets
@@ -45,7 +44,7 @@ def wait_for_app(name: str, url: str, expected: int, authorization: str) -> None
         try:
             if request(url, authorization)[0] == expected:
                 return
-        except (urllib.error.URLError, http.client.RemoteDisconnected, TimeoutError):
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
             pass
         time.sleep(1)
     print(docker("logs", "--tail", "80", name))
@@ -187,7 +186,7 @@ def main() -> None:
             if arguments.browser_seconds:
                 print(f"Temporary simulated ingress browser URL: {ingress_url}", flush=True)
                 time.sleep(arguments.browser_seconds)
-        except (AssertionError, RuntimeError, subprocess.CalledProcessError, urllib.error.URLError, http.client.RemoteDisconnected):
+        except (AssertionError, RuntimeError, subprocess.CalledProcessError, urllib.error.URLError, ConnectionError):
             if app_created:
                 print(docker("logs", "--tail", "80", app), flush=True)
             if client_created:
