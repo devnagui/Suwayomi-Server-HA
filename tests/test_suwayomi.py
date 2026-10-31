@@ -33,6 +33,43 @@ def options():
 
 
 class SuwayomiTests(unittest.TestCase):
+    def test_tls_reuses_readonly_ha_files_and_preserves_http_ingress(self):
+        self.assertIn("ssl:ro", MANIFEST["map"])
+        self.assertFalse(MANIFEST["options"]["ssl"])
+        configured = options()
+        self.assertIsNone(runner.certificate_paths(configured))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "fullchain.pem").write_text("test-only public certificate")
+            (root / "privkey.pem").write_text("test-only key fixture")
+            configured["ssl"] = True
+            paths = runner.certificate_paths(configured, root)
+            self.assertEqual(paths, (root / "fullchain.pem", root / "privkey.pem"))
+            rendered = runner.render_nginx(
+                (APP / "nginx.conf").read_text(), configured["auth_username"],
+                configured["auth_password"], True, paths,
+            )
+            self.assertIn("listen 8080;", rendered)
+            self.assertIn("listen 4567 ssl;", rendered)
+            self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", rendered)
+            self.assertIn('auth_basic "Suwayomi";', rendered)
+            self.assertNotIn("ssl_verify_client off", rendered)
+            before = runner.certificate_fingerprint(paths)
+            (root / "fullchain.pem").write_text("renewed test-only public certificate")
+            self.assertNotEqual(before, runner.certificate_fingerprint(paths))
+
+    def test_tls_paths_reject_missing_files_traversal_and_nginx_injection(self):
+        configured = options()
+        configured["ssl"] = True
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "missing"):
+                runner.certificate_paths(configured, root)
+            for value in ("../outside.pem", "/ssl/fullchain.pem", 'file.pem"; injected;', "file\n.pem"):
+                configured["certfile"] = value
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    runner.certificate_paths(configured, root)
+
     def test_smoke_readiness_handles_docker_startup_reset_without_masking_app_exit(self):
         smoke_spec = importlib.util.spec_from_file_location("suwayomi_smoke", ROOT / "tests" / "suwayomi_smoke.py")
         smoke = importlib.util.module_from_spec(smoke_spec)

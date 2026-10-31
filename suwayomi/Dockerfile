@@ -16,7 +16,7 @@ RUN python3 /build_source.py /source /output
 
 FROM eclipse-temurin:25-jre-noble
 ARG SOURCE_REF=6b481e8b62938b9c060eb210b934e0fbfdfa466b
-ARG BUILD_VERSION=0.1.2
+ARG BUILD_VERSION=0.1.3
 ARG BUILD_ARCH=amd64
 LABEL org.opencontainers.image.source="https://github.com/devnagui/Suwayomi-Server-HA" \
     org.opencontainers.image.licenses="MPL-2.0" \

@@ -20,7 +20,8 @@ the optional authenticated server API.
   local manga in an app-specific folder on an existing mounted USB disk.
 - Reuse an existing FlareSolverr service; no second solver or Chromium is started.
 - Optional direct access, disabled and unmapped by default, with mandatory
-  authentication. Use an HTTPS reverse proxy before Internet exposure.
+  authentication. Enable HTTPS with the existing HA certificates before
+  Internet forwarding, or use a trusted HTTPS reverse proxy.
 - Versioned images built from a pinned upstream server commit and its matching
   bundled WebUI, with daily upstream checks and automated tests before publication.
 
@@ -79,7 +80,7 @@ For a manual source update on a development machine,
 clone the upstream server beside this repository, or pass its checkout path:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.3
+node .\scripts\update-suwayomi.cjs 0.1.4
 ```
 
 The command fast-forwards a clean upstream checkout and updates the source pin

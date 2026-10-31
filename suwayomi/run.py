@@ -48,7 +48,7 @@ FIXED_SETTINGS = {
     "kcefEnabled": False,
     "authMode": "BASIC_AUTH",
 }
-EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path"}
+EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path", "ssl", "certfile", "keyfile"}
 RESERVED_SETTINGS = set(OPTION_SETTINGS.values()) | set(FIXED_SETTINGS) | {
     "rootDir", "authUsername", "authPassword", "basicAuthEnabled", "basicAuthUsername", "basicAuthPassword"
 }
@@ -102,7 +102,7 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
         raise ValueError("auth_username must contain 1-64 letters, digits, dots, underscores or hyphens")
     if not isinstance(password, str) or not 12 <= len(password) <= 256 or any(ord(c) < 32 or ord(c) == 127 for c in password):
         raise ValueError("Set auth_password to 12-256 characters without control characters before starting")
-    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback"):
+    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl"):
         if type(options[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
     for key, minimum, maximum in (
@@ -152,6 +152,31 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
     if missing:
         raise ValueError(f"Upstream settings contract changed: {', '.join(sorted(missing))}")
     return settings
+
+
+def certificate_paths(options: dict[str, Any], root: Path = Path("/ssl")) -> tuple[Path, Path] | None:
+    for key in ("certfile", "keyfile"):
+        value = options[key]
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._/-]+", value):
+            raise ValueError(f"{key} must be a certificate filename below /ssl")
+        relative = PurePosixPath(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"{key} must stay below /ssl")
+    if not options["ssl"]:
+        return None
+    paths = tuple(root / options[key] for key in ("certfile", "keyfile"))
+    for path in paths:
+        if not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
+            raise ValueError("Configured TLS certificate/key is missing or escapes /ssl")
+    return paths[0], paths[1]
+
+
+def certificate_fingerprint(paths: tuple[Path, Path]) -> tuple[tuple[str, int, int, int], ...]:
+    values = []
+    for path in paths:
+        state = path.stat()
+        values.append((str(path.resolve()), state.st_ino, state.st_mtime_ns, state.st_size))
+    return tuple(values)
 
 
 def validate_url(value: Any, key: str) -> urllib.parse.SplitResult:
@@ -240,11 +265,21 @@ def prepare_webui(target: Path, packaged: Path = Path("/app/webui")) -> None:
         raise
 
 
-def render_nginx(template: str, username: str, password: str, direct: bool) -> str:
+def render_nginx(template: str, username: str, password: str, direct: bool, tls: tuple[Path, Path] | None = None) -> str:
     authorization = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    directives = ""
+    if tls is not None:
+        cert, key = tls
+        directives = (
+            f'ssl_certificate "{cert}";\n        ssl_certificate_key "{key}";\n'
+            "        ssl_protocols TLSv1.2 TLSv1.3;\n"
+            "        ssl_session_cache shared:TLS:1m;\n"
+            "        ssl_session_timeout 10m;\n"
+            "        ssl_session_tickets off;"
+        )
     return template.replace("__INGRESS_AUTH__", authorization).replace(
         "__DIRECT_ACCESS__", "" if direct else "return 403;"
-    )
+    ).replace("__DIRECT_LISTEN__", "listen 4567 ssl;" if tls is not None else "listen 4567;").replace("__DIRECT_TLS__", directives)
 
 
 def private_file(path: Path, content: str, uid: int = 0, gid: int = 0, mode: int = 0o600) -> None:
@@ -292,6 +327,9 @@ def main() -> None:
     options = json.loads(Path("/data/options.json").read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     metadata = json.loads(Path("/app/build-info.json").read_text(encoding="utf-8"))
     settings = build_settings(options, set(metadata["server_settings"]))
+    tls = certificate_paths(options)
+    if tls is not None:
+        subprocess.run(["openssl", "x509", "-in", str(tls[0]), "-noout", "-checkend", "0"], check=True)
     paths = storage_paths(options)
     storage = prepare_path(paths["storage_path"])
     prepare_webui(storage / "webUI")
@@ -307,7 +345,7 @@ def main() -> None:
         text=True, capture_output=True, check=True,
     ).stdout.strip()
     private_file(runtime / "htpasswd", f'{options["auth_username"]}:{hashed}\n', gid=1001, mode=0o640)
-    nginx = render_nginx(Path("/app/nginx.conf").read_text(encoding="utf-8"), options["auth_username"], options["auth_password"], options["direct_access_enabled"])
+    nginx = render_nginx(Path("/app/nginx.conf").read_text(encoding="utf-8"), options["auth_username"], options["auth_password"], options["direct_access_enabled"], tls)
     private_file(runtime / "nginx.conf", nginx)
     subprocess.run(["nginx", "-t", "-c", str(runtime / "nginx.conf")], check=True)
     print(f'Starting Suwayomi {metadata["source_revision"][:12]} / WebUI {metadata["webui_revision"]}', flush=True)
@@ -330,7 +368,10 @@ def main() -> None:
         wait_ready(java, authorization)
         if stopping:
             return
-        children.append(subprocess.Popen(["nginx", "-c", str(runtime / "nginx.conf"), "-g", "daemon off;"]))
+        proxy = subprocess.Popen(["nginx", "-c", str(runtime / "nginx.conf"), "-g", "daemon off;"])
+        children.append(proxy)
+        tls_fingerprint = certificate_fingerprint(tls) if tls is not None else None
+        tls_check_at = time.monotonic() + 60
         if options["flaresolverr_enabled"]:
             try:
                 with urllib.request.urlopen(options["flaresolverr_url"], timeout=5) as response:
@@ -342,6 +383,19 @@ def main() -> None:
             for child in children:
                 if child.poll() is not None:
                     raise RuntimeError("A required process exited; inspect the preceding server/proxy error")
+            if tls is not None and time.monotonic() >= tls_check_at:
+                tls_check_at = time.monotonic() + 60
+                try:
+                    certificate_paths(options)
+                    changed = certificate_fingerprint(tls)
+                    if changed != tls_fingerprint:
+                        subprocess.run(["openssl", "x509", "-in", str(tls[0]), "-noout", "-checkend", "0"], check=True)
+                        subprocess.run(["nginx", "-t", "-c", str(runtime / "nginx.conf")], check=True)
+                        proxy.send_signal(signal.SIGHUP)
+                        tls_fingerprint = changed
+                        print("Reloaded renewed HA TLS certificate without restarting Suwayomi.", flush=True)
+                except (ValueError, OSError, subprocess.CalledProcessError) as error:
+                    print(f"ERROR: HA TLS certificate reload failed; retaining the active certificate and retrying in 60 seconds: {error}", file=sys.stderr, flush=True)
             time.sleep(0.5)
     finally:
         stop(0, None)

@@ -142,6 +142,8 @@ jobs:
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser
       - name: Verify mounted USB storage and real library persistence
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --usb-storage
+      - name: Verify direct HTTPS, configured certificate and renewal reload
+        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --tls --usb-storage
       - uses: docker/login-action@v4
         if: needs.prepare.outputs.publish == 'true'
         with:

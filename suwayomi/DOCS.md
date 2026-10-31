@@ -149,9 +149,42 @@ mapping for `4567/tcp` in the Network section. Both are off by default.
 Every direct route, API, download and WebSocket upgrade requires authentication;
 forging ingress headers grants no bypass. The backend is loopback-only on 4568.
 
-**Never forward plaintext port 4567 directly to the Internet.** Use a trusted
-HTTPS reverse proxy with a valid certificate, strong unique credentials,
-appropriate access/rate limits, and preserved Authorization/WebSocket headers.
+### Reuse the actual HA certificates for direct HTTPS
+
+From app 0.1.3, the direct listener can use HA's existing certificate files:
+
+```yaml
+direct_access_enabled: true
+ssl: true
+certfile: fullchain.pem
+keyfile: privkey.pem
+```
+
+The `/ssl` directory is mapped read-only. Set the filenames to the same chain/key
+used by HA Core; never paste or copy the private key into app options, source or
+USB storage. An expired/missing certificate, mismatched key or escaping path
+fails explicitly. HA ingress stays on its internal HTTP listener and retains
+HA's own HTTPS/authentication.
+
+Map `4567/tcp` to an unused HA host port. Connect with
+`https://YOUR_HA_CERTIFICATE_HOSTNAME:PORT/`; use the hostname in the certificate,
+not a raw IP that cannot pass hostname validation. The same URL and configured
+credentials are usable by separate clients.
+
+The app detects HA certificate replacement, including supported symlink renewals,
+and validates/reloads Nginx within 60 seconds without restarting Suwayomi.
+Renewal errors are shown in the app log; the active certificate remains loaded
+until the replacement is valid. Keep HA's normal certificate renewal process
+working; the app does not issue or replace HA certificates.
+
+For later router forwarding, forward only this authenticated **HTTPS** listener,
+retain strong unique credentials and maintain updates/backups. Consider upstream
+access/rate limits or a VPN/reverse proxy for additional protection. Router,
+firewall and WAN mappings are not changed by installing this app.
+
+**Never forward plaintext port 4567 directly to the Internet.** If `ssl` is off,
+put the app behind a trusted HTTPS reverse proxy with preserved
+Authorization/WebSocket headers.
 Alternatively, use your existing authenticated HA HTTPS ingress endpoint.
 This package does not change your router, firewall, TLS or HA authentication.
 
@@ -195,7 +228,7 @@ Clone upstream `Suwayomi-Server` beside `Suwayomi-Server-HA`, or pass a checkout
 path as the second argument:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.3
+node .\scripts\update-suwayomi.cjs 0.1.4
 ```
 
 The command rejects dirty checkouts and non-increasing app versions,
@@ -230,6 +263,10 @@ external solver stub and a Supervisor-style `172.30.32.0/24` test network.
 They fail if that subnet is already in use and clean up their own resources.
 They verify real H2 library persistence, not just a storage-path string.
 No tests contact/change live HA, the actual USB disk or the real solver.
+`--tls` additionally uses its own temporary test CA/key, verifies certificate
+trust/hostname and rejection of plaintext, then exercises a real renewal reload.
+It does not disable certificate checks. Run `--browser` separately from `--tls`;
+the browser/iframe tests and the verified HTTPS client cover distinct contracts.
 
 Local browser tests cover six routes, 98 app-owned assets, ingress iframe
 styles/icons, API/WebSocket requests, direct authentication, service-worker

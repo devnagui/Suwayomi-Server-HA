@@ -3,6 +3,8 @@ import base64
 import json
 import os
 import secrets
+import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -51,13 +53,34 @@ def wait_for_app(name: str, url: str, expected: int, authorization: str) -> None
     raise RuntimeError("App did not reach its expected HTTP state within 150 seconds")
 
 
+def make_test_certificate(image: str, directory: Path) -> None:
+    docker(
+        "run", "--rm", "--entrypoint", "openssl",
+        "--mount", f"type=bind,source={directory},target=/ssl", image,
+        "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256",
+        "-keyout", "/ssl/privkey.pem", "-out", "/ssl/fullchain.pem", "-days", "1",
+        "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    )
+
+
+def certificate_peer(port: int, ca: Path) -> bytes:
+    context = ssl.create_default_context(cafile=str(ca))
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+        with context.wrap_socket(connection, server_hostname="localhost") as secured:
+            assert secured.version() in ("TLSv1.2", "TLSv1.3")
+            return secured.getpeercert(binary_form=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("image")
     parser.add_argument("--browser", action="store_true")
     parser.add_argument("--usb-storage", action="store_true")
+    parser.add_argument("--tls", action="store_true")
     parser.add_argument("--browser-seconds", type=int, default=0)
     arguments = parser.parse_args()
+    if arguments.tls and arguments.browser:
+        parser.error("TLS smoke uses a verified private test CA; run browser/iframe checks separately without --tls")
     identifier = "suwayomi-check-" + uuid.uuid4().hex[:12]
     platform = "linux/" + docker("image", "inspect", "--format", "{{.Architecture}}", arguments.image)
     app = identifier + "-app"
@@ -82,7 +105,19 @@ def main() -> None:
             local_source_path="",
             flaresolverr_enabled=True,
             flaresolverr_url="http://172.30.32.2:8191",
+            ssl=arguments.tls,
         )
+        tls_directory = data / "ssl"
+        tls_mounts = []
+        if arguments.tls:
+            tls_directory.mkdir(mode=0o755)
+            make_test_certificate(arguments.image, tls_directory)
+            tls_mounts = ["--mount", f"type=bind,source={tls_directory},target=/ssl,readonly"]
+            trusted = tls_directory / "trusted-test-ca.pem"
+            trusted.write_bytes((tls_directory / "fullchain.pem").read_bytes())
+            urllib.request.install_opener(urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=str(trusted))),
+            ))
         options_path = data / "options.json"
         options_path.write_text(json.dumps(options), encoding="utf-8")
         authorization = base64.b64encode(f'{options["auth_username"]}:{options["auth_password"]}'.encode()).decode()
@@ -108,12 +143,13 @@ def main() -> None:
                 "--publish", "127.0.0.1::4567", "--publish", "127.0.0.1::8080",
                 "--mount", f"type=volume,source={volume},target=/data",
                 "--mount", f"type=bind,source={options_path},target=/data/options.json,readonly",
-                *storage_mounts, arguments.image,
+                *storage_mounts, *tls_mounts, arguments.image,
             )
             app_created = True
             direct_port = docker("port", app, "4567/tcp").rsplit(":", 1)[1]
             untrusted_port = docker("port", app, "8080/tcp").rsplit(":", 1)[1]
-            direct_url = "http://127.0.0.1:" + direct_port
+            scheme = "https" if arguments.tls else "http"
+            direct_url = scheme + "://127.0.0.1:" + direct_port
             wait_for_app(app, direct_url + "/", 200, authorization)
             assert request(direct_url + "/")[0] == 401, "Direct access must require authentication"
             assert request(direct_url + "/api/graphql", ingress=PREFIX)[0] == 401, "Ingress headers bypassed direct authentication"
@@ -140,6 +176,26 @@ def main() -> None:
                 },
             }}, "Actual server, bundled UI or external FlareSolverr settings differ from the packaged contract"
             print(f'PASS: updated backend {metadata["server_version"]}, packaged WebUI {metadata["webui_revision"]} and existing-service FlareSolverr configuration', flush=True)
+            if arguments.tls:
+                original = certificate_peer(int(direct_port), trusted)
+                expected = ssl.PEM_cert_to_DER_cert((tls_directory / "fullchain.pem").read_text())
+                assert original == expected, "The HTTPS listener did not reuse the configured certificate"
+                assert request("http://127.0.0.1:" + direct_port + "/")[0] == 400, "Plaintext was accepted on the HTTPS listener"
+                make_test_certificate(arguments.image, tls_directory)
+                with trusted.open("ab") as output:
+                    output.write((tls_directory / "fullchain.pem").read_bytes())
+                expected = ssl.PEM_cert_to_DER_cert((tls_directory / "fullchain.pem").read_text())
+                deadline = time.monotonic() + 80
+                while time.monotonic() < deadline:
+                    if certificate_peer(int(direct_port), trusted) == expected:
+                        break
+                    time.sleep(1)
+                else:
+                    raise RuntimeError("Renewed certificate was not reloaded within the declared interval")
+                urllib.request.install_opener(urllib.request.build_opener(
+                    urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=str(trusted))),
+                ))
+                print("PASS: verified HTTPS certificate, hostname/trust, plaintext rejection and renewal reload without a backend restart", flush=True)
             storage = options["storage_path"]
             docker("exec", app, "python3", "-c",
                 f"from pathlib import Path; p=Path({storage!r}); assert (p/'database.mv.db').is_file(); "
@@ -167,7 +223,7 @@ def main() -> None:
             options_path.write_text(json.dumps(options), encoding="utf-8")
             docker("restart", "--time", "60", app)
             direct_port = docker("port", app, "4567/tcp").rsplit(":", 1)[1]
-            direct_url = "http://127.0.0.1:" + direct_port
+            direct_url = scheme + "://127.0.0.1:" + direct_port
             wait_for_app(app, direct_url + "/", 403, authorization)
             assert request(direct_url + "/", authorization, PREFIX)[0] == 403, "Disabled direct access accepted a request"
             assert docker("exec", app, "cat", marker) == "preserved"

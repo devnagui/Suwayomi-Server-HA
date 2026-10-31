@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3
+
+- Add optional direct HTTPS using the existing HA certificate/key through a
+  read-only SSL mount; keep native ingress and mandatory direct authentication.
+- Validate certificate filenames, validity and key pairing without copying or
+  displaying private key contents.
+- Reload renewed HA certificates in place without restarting the manga server;
+  report renewal failures explicitly while retaining the active certificate.
+- Test certificate trust/hostname, plaintext rejection and real renewal reload.
+
 ## 0.1.2
 
 - Publish as the standalone, unofficial Suwayomi-Server-HA repackaging, with

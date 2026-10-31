@@ -1,6 +1,6 @@
 name: "Suwayomi Server"
 description: "Unofficial Suwayomi Server repackaging for Home Assistant, with ingress and configurable storage"
-version: "0.1.2"
+version: "0.1.3"
 slug: "suwayomi"
 url: "https://github.com/devnagui/Suwayomi-Server-HA"
 arch:
@@ -19,13 +19,17 @@ panel_title: "Suwayomi"
 ports:
   4567/tcp: null
 ports_description:
-  4567/tcp: "Optional authenticated HTTP API/WebUI; use a TLS reverse proxy for Internet access"
+  4567/tcp: "Authenticated direct API/WebUI; enable SSL with HA certificates before Internet forwarding"
 map:
   - media:rw
+  - ssl:ro
 options:
   auth_username: "suwayomi"
   auth_password: ""
   direct_access_enabled: false
+  ssl: false
+  certfile: "fullchain.pem"
+  keyfile: "privkey.pem"
   jvm_heap_mb: 768
   storage_path: "/data/server"
   downloads_path: ""
@@ -50,6 +54,9 @@ schema:
   auth_username: "str"
   auth_password: "password"
   direct_access_enabled: "bool"
+  ssl: "bool"
+  certfile: "str"
+  keyfile: "str"
   jvm_heap_mb: "int(256,1536)"
   storage_path: "str"
   downloads_path: "str"

@@ -8,6 +8,15 @@ configuration:
   direct_access_enabled:
     name: Enable direct API and WebUI access
     description: Also requires a Network port mapping. Keep off for ingress-only use; use HTTPS before Internet exposure.
+  ssl:
+    name: HTTPS for direct access
+    description: Use the existing Home Assistant certificate/key from the read-only /ssl mount. Ingress remains protected by HA.
+  certfile:
+    name: HA certificate file
+    description: Certificate-chain filename below /ssl, normally fullchain.pem. Never paste certificate/key contents here.
+  keyfile:
+    name: HA private-key file
+    description: Existing key filename below /ssl, normally privkey.pem. The key stays on HA and is never copied into the app's data.
   jvm_heap_mb:
     name: Maximum Java heap (MiB)
     description: Not a whole-app RAM cap. The 768 MiB default leaves headroom for HA and the shared FlareSolverr.
