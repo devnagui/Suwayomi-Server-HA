@@ -259,7 +259,11 @@ def main() -> None:
                 headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(persistence_request, timeout=20) as response:
-                assert json.load(response) == {"data": {"category": category}}, "Library database did not persist in the selected storage root"
+                persisted = json.load(response)
+                assert persisted == {"data": {"category": category}}, (
+                    "Library database did not persist in the selected storage root: "
+                    f"data={persisted.get('data')}, errors={len(persisted.get('errors', []))}"
+                )
             logs = docker("logs", app)
             if arguments.webui_channel == "bundled":
                 assert "Downloading WebUI" not in logs and "Downloading WebUI zip" not in logs, "Packaged UI unexpectedly required an Internet download"

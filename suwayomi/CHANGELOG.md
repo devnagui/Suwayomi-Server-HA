@@ -13,6 +13,8 @@
   real embedded-browser initialization before publication.
 - Keep runtime update/browser options separate from ingress and authentication;
   preserve older installations' bundled mode and disabled embedded browser.
+- Supervise Java directly when CEF is enabled and keep its authenticated virtual
+  display alive until Java has finished flushing the database during shutdown.
 
 ## 0.1.3
 

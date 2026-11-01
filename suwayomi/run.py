@@ -4,6 +4,8 @@ import json
 import math
 import os
 import re
+import secrets
+import select
 import signal
 import shutil
 import subprocess
@@ -244,11 +246,8 @@ def java_arguments(settings: dict[str, Any], heap: int) -> str:
     return "\n".join('"' + argument.replace("\\", "\\\\").replace('"', '\\"') + '"' for argument in arguments) + "\n"
 
 
-def java_command(embedded_browser: bool) -> list[str]:
-    command = ["java", "@/run/suwayomi/java.args"]
-    if embedded_browser:
-        command = ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x720x24", *command]
-    return command
+def java_command() -> list[str]:
+    return ["java", "@/run/suwayomi/java.args"]
 
 
 def terminate_child(child: subprocess.Popen) -> None:
@@ -257,6 +256,39 @@ def terminate_child(child: subprocess.Popen) -> None:
             os.killpg(child.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+
+
+def start_virtual_display(runtime: Path) -> subprocess.Popen:
+    authority = runtime / "display" / "Xauthority"
+    authority.parent.mkdir(mode=0o700, exist_ok=True)
+    os.chown(authority.parent, 1001, 1001)
+    private_file(authority, "", uid=1001, gid=1001)
+    subprocess.run(
+        ["xauth", "-f", str(authority)],
+        input=f"add :99 . {secrets.token_hex(16)}\n",
+        text=True, check=True, user=1001, group=1001,
+    )
+    display = subprocess.Popen(
+        ["Xvfb", ":99", "-displayfd", "1", "-screen", "0", "1280x720x24",
+         "-nolisten", "tcp", "-auth", str(authority)],
+        stdout=subprocess.PIPE, text=True, user=1001, group=1001, start_new_session=True,
+    )
+    output = display.stdout
+    try:
+        if output is None or not select.select([output], [], [], 10)[0] or output.readline().strip() != "99":
+            raise RuntimeError("Embedded browser virtual display did not become ready")
+        return display
+    except (OSError, RuntimeError):
+        terminate_child(display)
+        try:
+            display.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(display.pid, signal.SIGKILL)
+            display.wait()
+        raise
+    finally:
+        if output is not None:
+            output.close()
 
 
 def prepare_webui(target: Path, packaged: Path = Path("/app/webui")) -> None:
@@ -418,18 +450,25 @@ def main() -> None:
         flush=True,
     )
     children: list[subprocess.Popen] = []
+    display = None
     stopping = False
 
     def stop(_signum: int, _frame: Any) -> None:
         nonlocal stopping
         stopping = True
         for child in children:
-            terminate_child(child)
+            if child is not display:
+                terminate_child(child)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        java = subprocess.Popen(java_command(options["embedded_browser_enabled"]), user=1001, group=1001, start_new_session=True)
+        environment = os.environ.copy()
+        if options["embedded_browser_enabled"]:
+            display = start_virtual_display(runtime)
+            children.append(display)
+            environment.update(DISPLAY=":99", XAUTHORITY=str(runtime / "display" / "Xauthority"))
+        java = subprocess.Popen(java_command(), env=environment, user=1001, group=1001, start_new_session=True)
         children.append(java)
         authorization = base64.b64encode(f'{options["auth_username"]}:{options["auth_password"]}'.encode("utf-8")).decode("ascii")
         wait_ready(java, authorization)
@@ -466,7 +505,8 @@ def main() -> None:
             time.sleep(0.5)
     finally:
         stop(0, None)
-        for child in children:
+        for child in reversed(children):
+            terminate_child(child)
             try:
                 child.wait(timeout=45)
             except subprocess.TimeoutExpired:
