@@ -260,6 +260,14 @@ def main() -> None:
             )
             with urllib.request.urlopen(persistence_request, timeout=20) as response:
                 persisted = json.load(response)
+                if persisted != {"data": {"category": category}}:
+                    diagnostic = urllib.request.Request(
+                        ingress_url + "api/graphql",
+                        data=json.dumps({"query": "{ user { id } categories { nodes { id name } } }"}).encode(),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(diagnostic, timeout=20) as diagnosis:
+                        print(f"Restart category/user diagnostics: {json.load(diagnosis).get('data')}", flush=True)
                 assert persisted == {"data": {"category": category}}, (
                     "Library database did not persist in the selected storage root: "
                     f"data={persisted.get('data')}, "
