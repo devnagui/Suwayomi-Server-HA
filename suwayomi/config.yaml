@@ -1,6 +1,6 @@
 name: "Suwayomi Server"
 description: "Unofficial Suwayomi Server repackaging for Home Assistant, with ingress and configurable storage"
-version: "0.1.4"
+version: "0.1.5"
 slug: "suwayomi"
 url: "https://github.com/devnagui/Suwayomi-Server-HA"
 arch:
@@ -19,7 +19,7 @@ panel_title: "Suwayomi"
 ports:
   4567/tcp: null
 ports_description:
-  4567/tcp: "Authenticated direct API/WebUI; enable SSL with HA certificates before Internet forwarding"
+  4567/tcp: "Native UI login/JWT API and media; static login UI is public. Enable SSL before Internet forwarding"
 map:
   - media:rw
   - ssl:ro

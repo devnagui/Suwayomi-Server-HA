@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.5 (local candidate, not published)
+
+- Replace container-enforced Basic authentication with native UI_LOGIN/JWT;
+  reuse HA credentials for upstream built-in administrator 1 without resetting
+  accounts or library state.
+- Preserve HA administrator-only ingress with a private Unix-socket refresh
+  broker and automatic native WebUI sessions in the HA iframe. Shared refresh
+  tokens remain in private runtime files; only five-minute access JWTs reach
+  the browser. Failures are redacted, explicit and fail closed without fallback.
+- Keep direct access disabled/unmapped by default. When enabled, serve the
+  native login/static UI publicly but require JWT for library/API/media and
+  native WebSocket operations; retain existing HTTPS/renewal guards.
+- Verify Basic-auth migration, retained non-admin credentials/roles, real local
+  CBZ media protection, browser form/refresh/iframe behavior, private/USB storage,
+  runtime UI modes and intentional native refresh failures.
+- Retain server pin 6b481e8b (v2.4.2435), WebUI r3569 and its existing SHA-256,
+  all existing options, architecture names, heap settings and disabled CEF.
+- Keep the release authentication-only: do not apply/package server overlays.
+  Gate native AMD64/ARM64 publication on explicit 0.1.4 migration, intentional
+  authentication failure and stable WebUI compatibility checks as well.
+
+## Unreleased (independent work, excluded from 0.1.5)
+
+- Reject empty source chapter page lists before changing cached pages, download
+  flags or reading progress. Return a clear source-page error instead of an
+  empty successful cache response. The proposed source patch remains preserved
+  locally, but is excluded from this release's build, JAR and packaged provenance.
+
 ## 0.1.4
 
 - Package the latest compatible WebUI independently of the server source pin;

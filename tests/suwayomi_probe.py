@@ -18,7 +18,7 @@ BACKEND = "http://172.30.32.3:8080"
 
 
 def fetch(path: str, prefix: str = PREFIX) -> tuple[int, dict[str, str], bytes]:
-    request = urllib.request.Request(BACKEND + path, headers={"X-Ingress-Path": prefix})
+    request = urllib.request.Request(BACKEND + path, headers={"X-Ingress-Path": prefix, "Authorization":"Bearer "+os.environ["SUWAYOMI_TEST_TOKEN"]})
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, dict(response.headers), response.read()
@@ -33,6 +33,7 @@ def websocket() -> None:
             "GET /api/graphql HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
             "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
             f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: graphql-transport-ws\r\n"
+            f"Cookie: suwayomi-server-token={os.environ['SUWAYOMI_TEST_TOKEN']}\r\n"
             f"X-Ingress-Path: {PREFIX}\r\n\r\n"
         ).encode())
         headers = bytearray()
@@ -89,15 +90,15 @@ def probe() -> None:
         assert icon["src"].startswith("./") and fetch(icon["src"][1:])[0] == 200
     for chunked in (False, True):
         connection = http.client.HTTPConnection("172.30.32.3", 8080, timeout=10)
-        payload = b'{"query":"{ __typename }"}'
+        payload = b'{"query":"{ user { id } }"}'
         connection.request(
             "POST", "/api/graphql", body=iter([payload]) if chunked else payload,
-            headers={"Content-Type": "application/json", "X-Ingress-Path": PREFIX},
+            headers={"Content-Type": "application/json", "X-Ingress-Path": PREFIX, "Authorization":"Bearer "+os.environ["SUWAYOMI_TEST_TOKEN"]},
             encode_chunked=chunked,
         )
         response = connection.getresponse()
         assert response.status == 200
-        assert json.loads(response.read()) == {"data": {"__typename": "Query"}}
+        assert json.loads(response.read()) == {"data": {"user":{"id":1}}}
         connection.close()
     websocket()
     print(f"PASS: trusted ingress HTML, {len(paths)} initial assets, manifest/icons, fixed/chunked GraphQL and WebSocket acknowledgement")
@@ -108,6 +109,14 @@ class IngressSimulator(http.server.BaseHTTPRequestHandler):
         pass
 
     def relay(self) -> None:
+        if self.path == "/" and self.command == "GET":
+            body = f'<!doctype html><title>Authenticated HA administrator simulator</title><iframe title="HA ingress test" style="width:100%;height:900px;border:0" src="{PREFIX}/"></iframe>'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if not self.path.startswith(PREFIX + "/"):
             self.send_error(404)
             return
@@ -117,7 +126,7 @@ class IngressSimulator(http.server.BaseHTTPRequestHandler):
             return
         headers = {
             key: value for key, value in self.headers.items()
-            if key.lower() not in ("host", "connection", "content-length", "transfer-encoding", "authorization", "x-ingress-path")
+            if key.lower() not in ("host", "connection", "content-length", "transfer-encoding", "x-ingress-path")
         }
         headers["X-Ingress-Path"] = PREFIX
         headers["Host"] = self.headers["Host"]
@@ -137,7 +146,7 @@ class IngressSimulator(http.server.BaseHTTPRequestHandler):
             self.wfile.write(response.read())
 
     def upgrade(self, path: str) -> None:
-        headers = {key: value for key, value in self.headers.items() if key.lower() not in ("authorization", "x-ingress-path")}
+        headers = {key: value for key, value in self.headers.items() if key.lower() != "x-ingress-path"}
         headers["X-Ingress-Path"] = PREFIX
         request = f"GET {path} HTTP/1.1\r\n" + "".join(f"{key}: {value}\r\n" for key, value in headers.items()) + "\r\n"
         self.close_connection = True

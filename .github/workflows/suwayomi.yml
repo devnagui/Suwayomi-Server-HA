@@ -156,6 +156,14 @@ jobs:
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --webui-channel preview --browser --usb-storage
       - name: Verify direct HTTPS, configured certificate and renewal reload
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --tls --usb-storage
+      - name: Verify 0.1.4 Basic-auth migration to native UI_LOGIN
+        run: >-
+          python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage
+          --migration-from ghcr.io/devnagui/suwayomi-server-ha/suwayomi-${{ matrix.arch }}:0.1.4
+      - name: Verify intentional native authentication failure is explicit and fail closed
+        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage --auth-failure
+      - name: Verify stable WebUI native login and ingress compatibility
+        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --webui-channel stable --browser --usb-storage
       - uses: docker/login-action@v4
         if: needs.prepare.outputs.publish == 'true'
         with:

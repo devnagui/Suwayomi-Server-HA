@@ -88,6 +88,7 @@ def package(source: Path, output: Path, expected_webui: str | None = None, expec
         "webui_revision": revision,
         "webui_sha256": digest,
         "webui_build_override": "SERVER-WEBUI-OVERRIDE.gradle",
+        "server_patches": [],
         "server_settings": sorted(settings),
     }
     (output / "build-info.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

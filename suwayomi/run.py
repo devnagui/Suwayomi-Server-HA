@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import json
 import math
@@ -14,6 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any
+from ingress_auth import login
 
 
 OPTION_SETTINGS = {
@@ -46,7 +46,8 @@ FIXED_SETTINGS = {
     "initialOpenInBrowserEnabled": False,
     "systemTrayEnabled": False,
     "kcefEnabled": False,
-    "authMode": "BASIC_AUTH",
+    "authMode": "UI_LOGIN",
+    "jwtTokenExpiry": "5m",
 }
 WEBUI_DEFAULTS = {"webui_channel": "bundled", "webui_update_check_interval": 23}
 EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path", "ssl", "certfile", "keyfile"} | set(WEBUI_DEFAULTS)
@@ -104,6 +105,8 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
         raise ValueError("auth_username must contain 1-64 letters, digits, dots, underscores or hyphens")
     if not isinstance(password, str) or not 12 <= len(password) <= 256 or any(ord(c) < 32 or ord(c) == 127 for c in password):
         raise ValueError("Set auth_password to 12-256 characters without control characters before starting")
+    if password != password.strip():
+        raise ValueError("auth_password must not have leading or trailing whitespace; upstream UI login trims it")
     for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl"):
         if type(options[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
@@ -316,8 +319,7 @@ def prepare_selected_webui(target: Path, channel: str, packaged: Path = Path("/a
         raise
 
 
-def render_nginx(template: str, username: str, password: str, direct: bool, tls: tuple[Path, Path] | None = None) -> str:
-    authorization = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+def render_nginx(template: str, direct: bool, tls: tuple[Path, Path] | None = None) -> str:
     directives = ""
     if tls is not None:
         cert, key = tls
@@ -328,7 +330,7 @@ def render_nginx(template: str, username: str, password: str, direct: bool, tls:
             "        ssl_session_timeout 10m;\n"
             "        ssl_session_tickets off;"
         )
-    return template.replace("__INGRESS_AUTH__", authorization).replace(
+    return template.replace(
         "__DIRECT_ACCESS__", "" if direct else "return 403;"
     ).replace("__DIRECT_LISTEN__", "listen 4567 ssl;" if tls is not None else "listen 4567;").replace("__DIRECT_TLS__", directives)
 
@@ -341,8 +343,8 @@ def private_file(path: Path, content: str, uid: int = 0, gid: int = 0, mode: int
     os.chmod(path, mode)
 
 
-def wait_ready(java: subprocess.Popen, authorization: str) -> None:
-    request = urllib.request.Request("http://127.0.0.1:4568/", headers={"Authorization": f"Basic {authorization}"})
+def wait_ready(java: subprocess.Popen) -> None:
+    request = urllib.request.Request("http://127.0.0.1:4568/")
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         if java.poll() is not None:
@@ -359,7 +361,6 @@ def wait_ready(java: subprocess.Popen, authorization: str) -> None:
                 for asset in assets:
                     asset_request = urllib.request.Request(
                         "http://127.0.0.1:4568" + asset.decode("utf-8")[1:],
-                        headers={"Authorization": f"Basic {authorization}"},
                     )
                     with urllib.request.urlopen(asset_request, timeout=3) as response:
                         if response.status != 200 or not response.read(1):
@@ -373,6 +374,15 @@ def wait_ready(java: subprocess.Popen, authorization: str) -> None:
             pass
         time.sleep(1)
     raise RuntimeError("Suwayomi did not become ready within 120 seconds")
+
+
+def verify_ui_login(java: subprocess.Popen, username: str, password: str) -> dict[str, str]:
+    if java.poll() is not None:
+        raise RuntimeError("Suwayomi exited while verifying UI login")
+    try:
+        return login(username, password)
+    except (RuntimeError, KeyError, TypeError) as error:
+        raise RuntimeError("Configured UI login could not verify administrator 1; check HA credentials, accounts and username conflicts before exposing the app (details redacted)") from error
 
 
 def main() -> None:
@@ -392,13 +402,12 @@ def main() -> None:
     runtime.mkdir(exist_ok=True)
     os.chown(runtime, 0, 1001)
     os.chmod(runtime, 0o750)
+    broker_runtime = runtime / "auth"
+    broker_runtime.mkdir(exist_ok=True)
+    os.chown(broker_runtime, 1001, 1001)
+    os.chmod(broker_runtime, 0o700)
     private_file(runtime / "java.args", java_arguments(settings, options["jvm_heap_mb"]), uid=1001, gid=1001)
-    hashed = subprocess.run(
-        ["openssl", "passwd", "-6", "-stdin"], input=options["auth_password"] + "\n",
-        text=True, capture_output=True, check=True,
-    ).stdout.strip()
-    private_file(runtime / "htpasswd", f'{options["auth_username"]}:{hashed}\n', gid=1001, mode=0o640)
-    nginx = render_nginx(Path("/app/nginx.conf").read_text(encoding="utf-8"), options["auth_username"], options["auth_password"], options["direct_access_enabled"], tls)
+    nginx = render_nginx(Path("/app/nginx.conf").read_text(encoding="utf-8"), options["direct_access_enabled"], tls)
     private_file(runtime / "nginx.conf", nginx)
     subprocess.run(["nginx", "-t", "-c", str(runtime / "nginx.conf")], check=True)
     print(
@@ -420,8 +429,17 @@ def main() -> None:
     try:
         java = subprocess.Popen(["java", "@" + str(runtime / "java.args")], user=1001, group=1001)
         children.append(java)
-        authorization = base64.b64encode(f'{options["auth_username"]}:{options["auth_password"]}'.encode("utf-8")).decode("ascii")
-        wait_ready(java, authorization)
+        wait_ready(java)
+        tokens = verify_ui_login(java, options["auth_username"], options["auth_password"])
+        private_file(broker_runtime / "ingress-session.json", json.dumps(tokens), uid=1001, gid=1001)
+        (broker_runtime / "ingress-auth.sock").unlink(missing_ok=True)
+        broker = subprocess.Popen(["python3", "/app/ingress_auth.py"], user=1001, group=1001)
+        children.append(broker)
+        deadline = time.monotonic() + 5
+        while not (broker_runtime / "ingress-auth.sock").exists():
+            if broker.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError("Private HA ingress authentication broker failed to start")
+            time.sleep(0.05)
         if stopping:
             return
         proxy = subprocess.Popen(["nginx", "-c", str(runtime / "nginx.conf"), "-g", "daemon off;"])

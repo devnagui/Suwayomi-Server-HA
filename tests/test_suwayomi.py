@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -14,10 +15,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+import time
 
 
 ROOT = Path(__file__).parents[1]
 APP = ROOT / "suwayomi"
+sys.path.insert(0, str(APP))
 spec = importlib.util.spec_from_file_location("suwayomi_runner", APP / "run.py")
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
@@ -26,6 +29,7 @@ SUPPORTED = set(runner.OPTION_SETTINGS.values()) | set(runner.FIXED_SETTINGS) | 
     "authUsername", "authPassword", "socksProxyEnabled", "socksProxyHost",
     "socksProxyPassword", "socksProxyPort", "databaseType", "databaseUrl", "databaseUsername", "databasePassword",
 }
+import ingress_auth as auth
 
 
 def options():
@@ -35,6 +39,93 @@ def options():
 
 
 class SuwayomiTests(unittest.TestCase):
+    def test_native_login_is_bounded_and_cannot_be_overridden(self):
+        settings = runner.build_settings(options(), SUPPORTED)
+        self.assertEqual(settings["authMode"], "UI_LOGIN")
+        self.assertEqual(settings["jwtTokenExpiry"], "5m")
+        self.assertIs(MANIFEST.get("panel_admin", True), True)
+        for key in ("authMode", "jwtTokenExpiry", "authUsername", "authPassword", "kcefEnabled"):
+            configured = options()
+            configured["advanced_server_settings"] = json.dumps({key: "unsafe"})
+            with self.assertRaises(ValueError):
+                runner.build_settings(configured, SUPPORTED)
+        configured = options()
+        configured["auth_password"] = " leading-whitespace-password"
+        with self.assertRaisesRegex(ValueError, "whitespace"):
+            runner.build_settings(configured, SUPPORTED)
+
+    def test_startup_login_failure_is_redacted_and_does_not_fallback(self):
+        child = unittest.mock.Mock()
+        child.poll.return_value = None
+        with patch.object(runner, "login", side_effect=RuntimeError("private-secret")):
+            with self.assertRaisesRegex(RuntimeError, "administrator 1") as error:
+                runner.verify_ui_login(child, "private-user", "private-password")
+        self.assertNotIn("private-secret", str(error.exception))
+        self.assertNotIn("private-password", str(error.exception))
+        child.poll.return_value = 1
+        with patch.object(runner, "login") as login:
+            with self.assertRaisesRegex(RuntimeError, "exited"):
+                runner.verify_ui_login(child, "user", "password")
+            login.assert_not_called()
+
+    def test_broker_rejects_visitor_other_users_and_wrong_auth_mode(self):
+        for account in (
+            {"user": None, "settings": {"authMode": "UI_LOGIN"}},
+            {"user": {"id": 2, "roles": ["ADMIN"]}, "settings": {"authMode": "UI_LOGIN"}},
+            {"user": {"id": 1, "roles": ["USER"]}, "settings": {"authMode": "UI_LOGIN"}},
+            {"user": {"id": 1, "roles": ["ADMIN"]}, "settings": {"authMode": "NONE"}},
+        ):
+            with self.subTest(account=account), patch.object(auth, "graphql", return_value=account):
+                with self.assertRaisesRegex(RuntimeError, "administrator"):
+                    auth.validate_admin("test-only-token")
+
+    def test_broker_expiry_rejects_expired_unbounded_and_malformed_tokens(self):
+        def token(expiry):
+            claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+            return "test-header." + claims + ".test-signature"
+        self.assertGreater(auth.access_expiry(token(int(time.time()) + 300)), time.time())
+        for value in ("bad-token", "header.bad.signature", token(int(time.time()) - 1),
+                      token(int(time.time()) + 3600), token("tomorrow")):
+            with self.subTest(value=value), self.assertRaisesRegex(RuntimeError, "expiry"):
+                auth.access_expiry(value)
+
+    def test_broker_refresh_failure_logs_redacted_and_latches_denied(self):
+        session = auth.Session({"refreshToken": "private-refresh-token"})
+        output = io.StringIO()
+        with patch.object(auth, "graphql", side_effect=RuntimeError("private-refresh-token")) as request, patch.object(
+            auth.sys, "stderr", output,
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                    session.access_token()
+            self.assertEqual(request.call_count, 1)
+        self.assertIn("denied, no login fallback", output.getvalue())
+        self.assertNotIn("private-refresh-token", output.getvalue())
+
+    def test_broker_success_returns_only_validated_native_access_token(self):
+        session = auth.Session({"refreshToken": "private-refresh-token"})
+        with patch.object(auth, "graphql", return_value={"refreshToken": {"accessToken": "access"}}), patch.object(
+            auth, "access_expiry",
+        ), patch.object(auth, "validate_admin") as verify:
+            self.assertEqual(session.access_token(), "access")
+            verify.assert_called_once_with("access")
+        self.assertFalse(session.failed)
+
+    def test_ingress_broker_is_private_and_direct_routes_cannot_use_it(self):
+        template = runner.render_nginx((APP / "nginx.conf").read_text(), True)
+        ingress, direct = template.split("listen 4567;")
+        self.assertIn("http://unix:/run/suwayomi/auth/ingress-auth.sock", ingress)
+        self.assertNotIn("proxy_pass http://unix:", direct)
+        self.assertIn("location ^~ /__ha_auth/", direct)
+        self.assertIn("return 404;", direct)
+        self.assertIn("ha-ingress-session", auth.BOOTSTRAP)
+        self.assertNotIn("auth_password", auth.BOOTSTRAP)
+        self.assertNotIn("Basic ", template)
+        self.assertIn("window.fetch", auth.BOOTSTRAP)
+        self.assertIn("'USER_REFRESH'", auth.BOOTSTRAP)
+        self.assertIn("'REFRESH_ACCESS_TOKEN'", auth.BOOTSTRAP)
+        self.assertIn("console.error", auth.BOOTSTRAP)
+
     def test_tls_reuses_readonly_ha_files_and_preserves_http_ingress(self):
         self.assertIn("ssl:ro", MANIFEST["map"])
         self.assertFalse(MANIFEST["options"]["ssl"])
@@ -48,13 +139,12 @@ class SuwayomiTests(unittest.TestCase):
             paths = runner.certificate_paths(configured, root)
             self.assertEqual(paths, (root / "fullchain.pem", root / "privkey.pem"))
             rendered = runner.render_nginx(
-                (APP / "nginx.conf").read_text(), configured["auth_username"],
-                configured["auth_password"], True, paths,
+                (APP / "nginx.conf").read_text(), True, paths,
             )
             self.assertIn("listen 8080;", rendered)
             self.assertIn("listen 4567 ssl;", rendered)
             self.assertIn("ssl_protocols TLSv1.2 TLSv1.3;", rendered)
-            self.assertIn('auth_basic "Suwayomi";', rendered)
+            self.assertIn('Authorization $bearer_authorization;', rendered)
             self.assertNotIn("ssl_verify_client off", rendered)
             before = runner.certificate_fingerprint(paths)
             (root / "fullchain.pem").write_text("renewed test-only public certificate")
@@ -158,6 +248,30 @@ class SuwayomiTests(unittest.TestCase):
             self.assertNotEqual(rejected.returncode, 0)
             self.assertEqual(before, {name: (app / name).read_bytes() for name in before})
 
+    def test_native_matrix_gates_auth_migration_failure_and_stable_before_upload(self):
+        workflow = yaml.load((ROOT / ".github" / "workflows" / "suwayomi.yml").read_text(), Loader=yaml.BaseLoader)
+        build = workflow["jobs"]["build"]
+        self.assertEqual({item["runner"] for item in build["strategy"]["matrix"]["include"]},
+                         {"ubuntu-24.04", "ubuntu-24.04-arm"})
+        steps = build["steps"]
+        upload = next(index for index, step in enumerate(steps) if step.get("name", "").startswith("Upload tested"))
+        commands = [step.get("run", "") for step in steps[:upload]]
+        migration = [command for command in commands if "--migration-from" in command]
+        self.assertEqual(len(migration), 1)
+        self.assertIn("suwayomi-${{ matrix.arch }}:0.1.4", migration[0])
+        self.assertIn("--browser --usb-storage", migration[0])
+        self.assertTrue(any("--auth-failure" in command and "--browser --usb-storage" in command for command in commands))
+        self.assertTrue(any("--webui-channel stable --browser --usb-storage" in command for command in commands))
+        for selector in ("--browser", "--usb-storage", "--webui-channel preview", "--tls"):
+            self.assertTrue(any(selector in command for command in commands))
+
+    def test_auth_only_build_excludes_independent_server_overlay(self):
+        docker = (APP / "Dockerfile").read_text()
+        self.assertNotIn("chapter-page-list.patch", docker)
+        self.assertNotIn("git apply", docker)
+        self.assertNotIn("ChapterTest", docker)
+        self.assertIn("chapter-page-list.patch", (APP / ".dockerignore").read_text().splitlines())
+
     def test_daily_upstream_check_skips_unchanged_and_updates_changed_source(self):
         pins = yaml.safe_load((APP / "build.yaml").read_text())["args"]
         current_source = pins["SOURCE_REF"]
@@ -247,7 +361,7 @@ class SuwayomiTests(unittest.TestCase):
         self.assertEqual(settings["rootDir"], configured["storage_path"])
         self.assertEqual(settings["ip"], "127.0.0.1")
         self.assertEqual(settings["port"], 4568)
-        self.assertEqual(settings["authMode"], "BASIC_AUTH")
+        self.assertEqual(settings["authMode"], "UI_LOGIN")
         self.assertEqual(settings["webUIChannel"], "BUNDLED")
         self.assertEqual(settings["webUIFlavor"], "CUSTOM")
         self.assertFalse(settings["kcefEnabled"])
@@ -325,16 +439,18 @@ class SuwayomiTests(unittest.TestCase):
     def test_ingress_and_direct_authorization_are_separate(self):
         template = (APP / "nginx.conf").read_text()
         configured = options()
-        rendered = runner.render_nginx(template, configured["auth_username"], configured["auth_password"], False)
+        rendered = runner.render_nginx(template, False)
         authorization = base64.b64encode(f'{configured["auth_username"]}:{configured["auth_password"]}'.encode()).decode()
         ingress, direct = rendered.split("listen 4567;")
-        self.assertIn('Authorization "Basic ' + authorization + '"', ingress)
+        self.assertIn('Authorization $bearer_authorization;', ingress)
         self.assertIn("allow 172.30.32.2;", ingress)
         self.assertIn("deny all;", ingress)
         self.assertIn("return 403;", direct)
-        self.assertIn('auth_basic "Suwayomi";', direct)
+        self.assertNotIn('auth_basic', rendered)
+        self.assertNotIn('htpasswd', rendered)
+        self.assertNotIn(configured["auth_password"], rendered)
         self.assertNotIn(authorization, direct)
-        self.assertNotIn("return 403;", runner.render_nginx(template, "user", "password", True).split("listen 4567;")[1])
+        self.assertNotIn("return 403;", runner.render_nginx(template, True).split("listen 4567;")[1])
         self.assertIn("proxy_set_header X-Ingress-Path", direct)
 
     def test_only_html_base_tag_is_rewritten(self):
@@ -435,7 +551,7 @@ class SuwayomiTests(unittest.TestCase):
             self.assertEqual(settings["webUIFlavor"], "CUSTOM" if channel == "bundled" else "WEBUI")
             self.assertEqual(settings["webUIUpdateCheckInterval"], 0 if channel == "bundled" else 23)
             self.assertFalse(settings["kcefEnabled"])
-            self.assertEqual(settings["authMode"], "BASIC_AUTH")
+            self.assertEqual(settings["authMode"], "UI_LOGIN")
         legacy = {key: value for key, value in options().items() if key not in runner.WEBUI_DEFAULTS}
         self.assertEqual(runner.build_settings(legacy, SUPPORTED)["webUIChannel"], "BUNDLED")
         configured = options() | {"webui_channel": "preview", "webui_update_check_interval": 0}
@@ -543,13 +659,14 @@ class SuwayomiTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("package_builder", APP / "build_source.py")
         builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(builder)
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             root = Path(temporary)
             source = root / "source"
             jars = source / "server/build"
             jars.mkdir(parents=True)
             (source / "LICENSE").write_text("test-only license fixture")
             (source / "ha-webui.gradle").write_text("test-only override fixture")
+            (source / "chapter-page-list.patch").write_text("test-only patch fixture")
             ui = io.BytesIO()
             with zipfile.ZipFile(ui, "w") as archive:
                 archive.writestr("index.html", '<base href="/">')
@@ -569,6 +686,18 @@ class SuwayomiTests(unittest.TestCase):
             self.assertEqual(metadata["webui_revision"], "r3569")
             self.assertEqual(metadata["webui_sha256"], digest)
             self.assertTrue((root / "output/SERVER-WEBUI-OVERRIDE.gradle").is_file())
+            self.assertEqual(metadata["server_patches"], [])
+            self.assertFalse((root / "output/chapter-page-list.patch").exists())
+            self.assertEqual((source / "chapter-page-list.patch").read_text(), "test-only patch fixture")
+
+    def test_ui_login_readiness_requires_builtin_admin_without_exposing_tokens(self):
+        java = unittest.mock.Mock()
+        java.poll.return_value = None
+        expected = {"accessToken": "test-only-access", "refreshToken": "test-only-refresh"}
+        with patch.object(runner, "login", return_value=expected):
+            self.assertEqual(runner.verify_ui_login(java, "admin", "test-only password"), expected)
+        with patch.object(runner, "login", side_effect=RuntimeError("private-token")), self.assertRaisesRegex(RuntimeError, "administrator 1"):
+            runner.verify_ui_login(java, "admin", "test-only password")
 
 if __name__ == "__main__":
     unittest.main()

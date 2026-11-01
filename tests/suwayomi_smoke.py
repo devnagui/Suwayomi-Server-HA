@@ -22,13 +22,13 @@ PREFIX = "/api/hassio_ingress/suwayomi-test-session"
 
 
 def docker(*arguments: str) -> str:
-    return subprocess.check_output(["docker", *arguments], text=True).strip()
+    return subprocess.check_output(["docker", *arguments], text=True, stderr=subprocess.STDOUT).strip()
 
 
 def request(url: str, authorization: str = "", ingress: str = "") -> tuple[int, bytes]:
     headers = {}
     if authorization:
-        headers["Authorization"] = "Basic " + authorization
+        headers["Authorization"] = "Bearer " + authorization
     if ingress:
         headers["X-Ingress-Path"] = ingress
     try:
@@ -64,6 +64,19 @@ def make_test_certificate(image: str, directory: Path) -> None:
     )
 
 
+def graphql(url: str, query: str, variables: dict | None = None, token: str = "", headers: dict | None = None) -> dict:
+    request_headers = {"Content-Type": "application/json"} | (headers or {})
+    if token:
+        request_headers["Authorization"] = "Bearer " + token
+    message = urllib.request.Request(
+        url + "/api/graphql", data=json.dumps({"query": query, "variables": variables or {}}).encode(),
+        headers=request_headers,
+    )
+    with urllib.request.urlopen(message, timeout=15) as response:
+        assert response.status == 200
+        return json.load(response)
+
+
 def certificate_peer(port: int, ca: Path) -> bytes:
     context = ssl.create_default_context(cafile=str(ca))
     with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
@@ -78,6 +91,8 @@ def main() -> None:
     parser.add_argument("--browser", action="store_true")
     parser.add_argument("--usb-storage", action="store_true")
     parser.add_argument("--tls", action="store_true")
+    parser.add_argument("--migration-from", help="Local 0.1.4 image used to seed an existing Basic-auth library/users")
+    parser.add_argument("--auth-failure", action="store_true", help="Invalidate only the disposable server's JWT audience and verify fail-closed ingress")
     parser.add_argument("--webui-channel", choices=("bundled", "stable", "preview"), default="bundled")
     parser.add_argument("--browser-seconds", type=int, default=0)
     arguments = parser.parse_args()
@@ -94,7 +109,7 @@ def main() -> None:
     usb_created = False
     app_created = False
     client_created = False
-    with tempfile.TemporaryDirectory(prefix="suwayomi-ha-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=".suwayomi-validation-", dir=ROOT) as temporary:
         data = Path(temporary)
         data.chmod(0o755)
         options = yaml.safe_load((ROOT / "suwayomi" / "config.yaml").read_text())["options"]
@@ -123,7 +138,7 @@ def main() -> None:
             ))
         options_path = data / "options.json"
         options_path.write_text(json.dumps(options), encoding="utf-8")
-        authorization = base64.b64encode(f'{options["auth_username"]}:{options["auth_password"]}'.encode()).decode()
+        authorization = ""
         try:
             docker("network", "create", "--subnet", "172.30.32.0/24", identifier)
             network_created = True
@@ -141,6 +156,43 @@ def main() -> None:
                 arguments.image, "/tests/suwayomi_probe.py", "--serve",
             )
             client_created = True
+            old_category = None
+            if arguments.migration_from:
+                docker(
+                    "run", "--detach", "--platform", platform, "--name", app, "--network", identifier, "--ip", "172.30.32.3",
+                    "--publish", "127.0.0.1::4567",
+                    "--mount", f"type=volume,source={volume},target=/data",
+                    "--mount", f"type=bind,source={options_path},target=/data/options.json,readonly",
+                    *storage_mounts, *tls_mounts, arguments.migration_from,
+                )
+                app_created = True
+                old_port = docker("port", app, "4567/tcp").rsplit(":", 1)[1]
+                old_url = ("https" if arguments.tls else "http") + "://127.0.0.1:" + old_port
+                legacy = base64.b64encode(f'{options["auth_username"]}:{options["auth_password"]}'.encode()).decode()
+                deadline = time.monotonic() + 150
+                while time.monotonic() < deadline:
+                    try:
+                        message = urllib.request.Request(old_url, headers={"Authorization": "Basic " + legacy})
+                        with urllib.request.urlopen(message, timeout=3) as response:
+                            if response.status == 200:
+                                break
+                    except (urllib.error.URLError, ConnectionError, TimeoutError):
+                        if docker("inspect", "--format", "{{.State.Running}}", app) != "true":
+                            raise RuntimeError("Old Basic-auth fixture exited before readiness")
+                        time.sleep(1)
+                else:
+                    raise RuntimeError("Old Basic-auth fixture did not start")
+                legacy_headers = {"Authorization": "Basic " + legacy}
+                old_category = graphql(old_url,
+                    'mutation{createCategory(input:{name:"Existing Basic-auth library"}){category{id name}}}',
+                    headers=legacy_headers)["data"]["createCategory"]["category"]
+                registered = graphql(old_url,
+                    'mutation{register(input:{username:"retained-reader",password:"test-reader-password",userPermissions:[]}){clientMutationId}}',
+                    headers=legacy_headers)
+                assert "errors" not in registered, "Could not seed an existing reader account"
+                docker("stop", "--time", "60", app)
+                docker("rm", app)
+                app_created = False
             docker(
                 "run", "--detach", "--platform", platform, "--name", app, "--network", identifier, "--ip", "172.30.32.3",
                 "--publish", "127.0.0.1::4567", "--publish", "127.0.0.1::8080",
@@ -154,19 +206,82 @@ def main() -> None:
             scheme = "https" if arguments.tls else "http"
             direct_url = scheme + "://127.0.0.1:" + direct_port
             wait_for_app(app, direct_url + "/", 200, authorization)
-            assert request(direct_url + "/")[0] == 401, "Direct access must require authentication"
-            assert request(direct_url + "/api/graphql", ingress=PREFIX)[0] == 401, "Ingress headers bypassed direct authentication"
-            assert request(direct_url + "/", base64.b64encode(b"wrong:wrong").decode())[0] == 401
+            docker("exec", app, "python3", "-c",
+                "from pathlib import Path; p=Path('/run/suwayomi/auth'); assert p.stat().st_mode & 0o777==0o700; "
+                "assert (p/'ingress-session.json').stat().st_mode & 0o777==0o600; "
+                "assert (p/'ingress-auth.sock').stat().st_mode & 0o777==0o600; "
+                "assert p.stat().st_uid==1001; "
+                "assert 'Basic ' not in Path('/run/suwayomi/nginx.conf').read_text()")
+            assert request(direct_url + "/")[0] == 200, "UI login must serve its page without Basic auth"
+            for legacy_headers in (
+                {"X-Ingress-Path": PREFIX},
+                {"Authorization": "Basic " + base64.b64encode(
+                    f'{options["auth_username"]}:{options["auth_password"]}'.encode()).decode()},
+            ):
+                assert "errors" in graphql(direct_url, "{user{id}}", headers=legacy_headers), "Anonymous or Basic request bypassed UI login"
+            login_query = "mutation($input:LoginInput!){login(input:$input){accessToken refreshToken}}"
+            assert "errors" in graphql(direct_url, login_query, {"input":{"username":options["auth_username"],"password":"wrong-password"}})
+            logged_in = graphql(direct_url, login_query, {"input":{"username":options["auth_username"],"password":options["auth_password"]}})
+            assert "errors" not in logged_in, "Configured admin could not sign in through UI login"
+            tokens = logged_in["data"]["login"]
+            authorization = tokens["accessToken"]
+            assert graphql(direct_url, "{user{id roles} settings{authMode}}", token=authorization) == {
+                "data":{"user":{"id":1,"roles":["ADMIN"]},"settings":{"authMode":"UI_LOGIN"}},
+            }
+            if old_category:
+                assert graphql(direct_url, f'{{category(id:{old_category["id"]}){{id name}}}}', token=authorization) == {
+                    "data": {"category": old_category},
+                }, "Existing Basic-auth library was lost during UI_LOGIN migration"
+                reader = graphql(direct_url, login_query, {"input":{"username":"retained-reader","password":"test-reader-password"}})
+                assert "errors" not in reader, "Existing reader credentials were changed"
+                reader_token = reader["data"]["login"]["accessToken"]
+                identity = graphql(direct_url, "{user{id roles}}", token=reader_token)["data"]["user"]
+                assert identity["id"] != 1 and identity["roles"] == ["USER"], "Existing reader was escalated"
+                assert "errors" in graphql(direct_url,
+                    'mutation{register(input:{username:"forbidden",password:"test-only-password"}){clientMutationId}}',
+                    token=reader_token), "A retained reader gained user-management privileges"
+                print("PASS: actual 0.1.4 Basic-auth to UI_LOGIN migration retained administrator-1 library and non-admin credentials/roles", flush=True)
+            refresh = graphql(direct_url, "mutation($input:RefreshTokenInput!){refreshToken(input:$input){accessToken}}",
+                              {"input":{"refreshToken":tokens["refreshToken"]}})
+            assert "errors" not in refresh, "Native token refresh failed"
+            authorization = refresh["data"]["refreshToken"]["accessToken"]
+            assert request(direct_url + "/__ha_auth/bootstrap.js")[0] == 404
+            for query in ("{mangas{totalCount}}", 'mutation{createCategory(input:{name:"unauthorized"}){category{id}}}'):
+                assert "errors" in graphql(direct_url, query), "Anonymous library/mutation was accepted"
+            assert "errors" in graphql(direct_url, "{user{id}}", token="invalid-token")
+            assert "errors" in graphql(direct_url,
+                "mutation($input:RefreshTokenInput!){refreshToken(input:$input){accessToken}}",
+                {"input":{"refreshToken":"invalid-token"}})
             assert b'<base href="/">' in request(direct_url + "/", authorization)[1], "Direct HTML was rewritten"
             assert request("http://127.0.0.1:" + untrusted_port + "/", ingress=PREFIX)[0] == 403, "Ingress trusted a non-Supervisor caller"
             ingress_port = docker("port", client, "8123/tcp").rsplit(":", 1)[1]
             ingress_url = "http://127.0.0.1:" + ingress_port + PREFIX + "/"
-            print(docker("exec", client, "python3", "/tests/suwayomi_probe.py"), flush=True)
+            broker_request = urllib.request.Request(
+                ingress_url + "__ha_auth/session", data=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(broker_request, timeout=15) as response:
+                broker_token = json.load(response)["data"]["refreshToken"]["accessToken"]
+                assert response.headers["Cache-Control"].startswith("no-store")
+            assert graphql(ingress_url.rstrip("/"), "{user{id roles}}", token=broker_token) == {
+                "data": {"user": {"id": 1, "roles": ["ADMIN"]}},
+            }
+            assert request(ingress_url + "__ha_auth/session")[0] == 404
+            forged = urllib.request.Request(
+                ingress_url + "__ha_auth/session", data=b"{}",
+                headers={"Content-Type": "application/json", "Origin": "https://untrusted.example", "Sec-Fetch-Site": "cross-site"},
+            )
+            try:
+                urllib.request.urlopen(forged, timeout=10)
+                raise AssertionError("Cross-site ingress session request was accepted")
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
+            print(docker("exec", "--env", "SUWAYOMI_TEST_TOKEN="+authorization, client, "python3", "/tests/suwayomi_probe.py"), flush=True)
             metadata = json.loads(docker("exec", app, "cat", "/app/build-info.json"))
             query = urllib.request.Request(
                 direct_url + "/api/graphql",
                 data=json.dumps({"query": "{ aboutServer { version } aboutWebUI { tag channel } webUIUpdateStatus: getWebUIUpdateStatus { state } settings { flareSolverrEnabled flareSolverrUrl kcefEnabled webUIFlavor webUIChannel webUIUpdateCheckInterval } }"}).encode(),
-                headers={"Authorization": "Basic " + authorization, "Content-Type": "application/json"},
+                headers={"Authorization": "Bearer " + authorization, "Content-Type": "application/json"},
             )
             with urllib.request.urlopen(query, timeout=20) as response:
                 configured = json.load(response)
@@ -208,6 +323,37 @@ def main() -> None:
                 ))
                 print("PASS: verified HTTPS certificate, hostname/trust, plaintext rejection and renewal reload without a backend restart", flush=True)
             storage = options["storage_path"]
+            fixture = (
+                "import base64, zipfile\nfrom pathlib import Path\n"
+                f"root=Path({storage!r})/'local'/'HA authentication fixture'\nroot.mkdir(exist_ok=True)\n"
+                "png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=')\n"
+                "with zipfile.ZipFile(root/'chapter 1.cbz','w') as archive:\n    archive.writestr('001.png',png)\n"
+            )
+            subprocess.run(["docker", "exec", "-i", "--user", "1001", app, "python3", "-"], input=fixture, text=True, check=True)
+            discovered = graphql(direct_url,
+                'mutation{fetchSourceManga(input:{source:"0",type:POPULAR,page:1}){mangas{id title thumbnailUrl}}}', token=authorization)
+            assert "errors" not in discovered, "Local media fixture discovery failed"
+            manga = next(value for value in discovered["data"]["fetchSourceManga"]["mangas"] if value["title"] == "HA authentication fixture")
+            details = graphql(direct_url,
+                f'mutation{{fetchMangaAndChapters(input:{{id:{manga["id"]},fetchManga:true,fetchChapters:true}}){{chapters{{id}}}}}}',
+                token=authorization)
+            assert "errors" not in details, "Local chapter fixture fetch failed"
+            chapter = details["data"]["fetchMangaAndChapters"]["chapters"][0]
+            pages = graphql(direct_url, f'mutation{{fetchChapterPages(input:{{chapterId:{chapter["id"]}}}){{pages}}}}', token=authorization)
+            assert "errors" not in pages, "Local page fixture fetch failed"
+            library = graphql(direct_url,
+                f'mutation{{updateManga(input:{{id:{manga["id"]},patch:{{inLibrary:true}}}}){{manga{{id inLibrary}}}}}}',
+                token=authorization)
+            assert library["data"]["updateManga"]["manga"]["inLibrary"], "Fixture manga did not enter administrator library"
+            for media_path in (manga["thumbnailUrl"], pages["data"]["fetchChapterPages"]["pages"][0]):
+                assert media_path.startswith("/api/"), "Unexpected native media path"
+                assert request(direct_url + media_path)[0] == 401, "Anonymous media was exposed"
+                assert request(direct_url + media_path, "invalid-token")[0] == 401, "Invalid JWT accessed media"
+                status, body = request(direct_url + media_path, authorization)
+                assert status == 200 and body.startswith(b"\x89PNG"), "Native JWT did not deliver the actual local image"
+                separator = "&" if "?" in media_path else "?"
+                assert request(direct_url + media_path + separator + "token=" + authorization)[0] == 200, "Native image query JWT failed"
+            print("PASS: real local CBZ thumbnail/page bytes, native bearer/query JWT media, anonymous/invalid-JWT rejection and library membership", flush=True)
             docker("exec", app, "python3", "-c",
                 f"from pathlib import Path; p=Path({storage!r}); assert (p/'database.mv.db').is_file(); "
                 "assert (p/'server.conf').is_file(); assert all((p/name).is_dir() for name in ('downloads','backups','local')); "
@@ -215,7 +361,7 @@ def main() -> None:
             category_request = urllib.request.Request(
                 direct_url + "/api/graphql",
                 data=json.dumps({"query": 'mutation { createCategory(input:{name:"HA storage persistence check"}) { category { id name } } }'}).encode(),
-                headers={"Authorization": "Basic " + authorization, "Content-Type": "application/json"},
+                headers={"Authorization": "Bearer " + authorization, "Content-Type": "application/json"},
             )
             with urllib.request.urlopen(category_request, timeout=20) as response:
                 created = json.load(response)
@@ -223,11 +369,25 @@ def main() -> None:
             category = created["data"]["createCategory"]["category"]
             assert category["name"] == "HA storage persistence check"
             if arguments.browser:
-                environment = os.environ | {"SUWAYOMI_TEST_AUTH": authorization}
+                environment = os.environ | {"SUWAYOMI_TEST_USERNAME":options["auth_username"], "SUWAYOMI_TEST_PASSWORD":options["auth_password"]}
                 subprocess.run(
                     ["node", str(ROOT / "tests" / "suwayomi_browser.mjs"), ingress_url, direct_url + "/"],
                     env=environment, check=True,
                 )
+            expiry_setting = graphql(direct_url,
+                'mutation{setSettings(input:{settings:{jwtTokenExpiry:"1s"}}){settings{jwtTokenExpiry}}}', token=authorization)
+            assert "errors" not in expiry_setting, "Could not configure the disposable fixture's short native token"
+            expiring = graphql(direct_url, login_query, {"input":{"username":options["auth_username"],"password":options["auth_password"]}})["data"]["login"]
+            time.sleep(2)
+            assert "errors" in graphql(direct_url, "{user{id}}", token=expiring["accessToken"]), "Expired native JWT remained authenticated"
+            assert request(direct_url + manga["thumbnailUrl"], expiring["accessToken"])[0] == 401, "Expired native JWT accessed media"
+            refreshed = graphql(direct_url, "mutation($input:RefreshTokenInput!){refreshToken(input:$input){accessToken}}",
+                {"input":{"refreshToken":expiring["refreshToken"]}}, token=expiring["accessToken"])
+            assert "errors" not in refreshed, "Native direct client could not refresh an expired access token"
+            assert graphql(direct_url, "{user{id}}", token=refreshed["data"]["refreshToken"]["accessToken"])["data"]["user"]["id"] == 1
+            assert "errors" not in graphql(direct_url,
+                'mutation{setSettings(input:{settings:{jwtTokenExpiry:"5m"}}){settings{jwtTokenExpiry}}}', token=authorization)
+            print("PASS: actual native access-token expiry rejects direct library/media; refresh accepts expired Bearer Authorization and restores administrator identity", flush=True)
             marker = storage + "/ha-persistence-check"
             docker("exec", "--user", "1001", app, "python3", "-c", f"from pathlib import Path; Path({marker!r}).write_text('preserved')")
             options["direct_access_enabled"] = False
@@ -238,10 +398,20 @@ def main() -> None:
             wait_for_app(app, direct_url + "/", 403, authorization)
             assert request(direct_url + "/", authorization, PREFIX)[0] == 403, "Disabled direct access accepted a request"
             assert docker("exec", app, "cat", marker) == "preserved"
+            if old_category:
+                assert graphql(ingress_url.rstrip("/"), "{user{id roles}}", token=reader_token) == {
+                    "data": {"user": identity},
+                }, "The retained reader account/roles changed after restart"
+                assert graphql(ingress_url.rstrip("/"), f'{{category(id:{old_category["id"]}){{id name}}}}', token=authorization) == {
+                    "data": {"category": old_category},
+                }, "The pre-migration library category changed after restart"
+            assert graphql(ingress_url.rstrip("/"), f'{{manga(id:{manga["id"]}){{id inLibrary}}}}', token=authorization) == {
+                "data": {"manga": {"id": manga["id"], "inLibrary": True}},
+            }, "Administrator manga library membership did not persist"
             persistence_request = urllib.request.Request(
                 ingress_url + "api/graphql",
                 data=json.dumps({"query": f'{{ category(id:{category["id"]}) {{ id name }} }}'}).encode(),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Authorization":"Bearer "+authorization},
             )
             with urllib.request.urlopen(persistence_request, timeout=20) as response:
                 persisted = json.load(response)
@@ -249,7 +419,7 @@ def main() -> None:
                     diagnostic = urllib.request.Request(
                         ingress_url + "api/graphql",
                         data=json.dumps({"query": "{ user { id } categories { nodes { id name } } }"}).encode(),
-                        headers={"Content-Type": "application/json"},
+                        headers={"Content-Type": "application/json", "Authorization":"Bearer "+authorization},
                     )
                     with urllib.request.urlopen(diagnostic, timeout=20) as diagnosis:
                         print(f"Restart category/user diagnostics: {json.load(diagnosis).get('data')}", flush=True)
@@ -259,13 +429,38 @@ def main() -> None:
                     f"errors={[(error.get('message', '').splitlines() or [''])[0].replace(options['auth_password'], '<redacted>').replace(authorization, '<redacted>') for error in persisted.get('errors', [])]}"
                 )
             logs = docker("logs", app)
+            assert all(value not in logs for value in (
+                options["auth_password"], authorization, tokens["refreshToken"], expiring["accessToken"], expiring["refreshToken"],
+            )), "Logs exposed credentials/JWT"
             if arguments.webui_channel == "bundled":
                 assert "Downloading WebUI" not in logs and "Downloading WebUI zip" not in logs, "Packaged UI unexpectedly required an Internet download"
             else:
                 assert "Downloading WebUI zip from the Internet" in logs, "Runtime mode did not exercise an actual UI download"
-            print(docker("exec", client, "python3", "/tests/suwayomi_probe.py"), flush=True)
+            print(docker("exec", "--env", "SUWAYOMI_TEST_TOKEN="+authorization, client, "python3", "/tests/suwayomi_probe.py"), flush=True)
             print("PASS: authentication, trusted ingress, streamed API/WebSockets, disabled direct port and persistent state", flush=True)
             print(f"PASS: {'mounted USB' if arguments.usb_storage else 'private /data'} storage root, actual H2 library persistence, downloads/backups/local paths", flush=True)
+            if arguments.auth_failure:
+                changed = graphql(ingress_url.rstrip("/"),
+                    'mutation{setSettings(input:{settings:{jwtAudience:"disposable-smoke-revoked"}}){settings{jwtAudience}}}',
+                    token=authorization)
+                assert "errors" not in changed, "Could not invalidate the disposable fixture's JWT audience"
+                for _ in range(2):
+                    try:
+                        urllib.request.urlopen(broker_request, timeout=15)
+                        raise AssertionError("Failed broker refresh was accepted")
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 503
+                        assert b"Administrator session unavailable" in error.read()
+                assert "denied, no login fallback" in docker("logs", app)
+                if arguments.browser:
+                    subprocess.run(
+                        ["node", str(ROOT / "tests" / "suwayomi_browser.mjs"), "--expect-ingress-auth-failure", ingress_url],
+                        check=True,
+                    )
+                failure_logs = docker("logs", app)
+                assert all(value not in failure_logs for value in (options["auth_password"], broker_token, authorization, tokens["refreshToken"]))
+                print("PASS: actual native JWT refresh rejection, latched 503 and redacted logs without fallback"
+                      + ("; frontend shows explicit fail-closed error" if arguments.browser else ""), flush=True)
             if arguments.browser_seconds:
                 print(f"Temporary simulated ingress browser URL: {ingress_url}", flush=True)
                 time.sleep(arguments.browser_seconds)
