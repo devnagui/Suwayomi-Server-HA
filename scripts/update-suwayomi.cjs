@@ -4,7 +4,16 @@ const { execFileSync } = require('node:child_process');
 
 const defaultApp = path.resolve(__dirname, '..', 'suwayomi');
 
-function pin(version, revision, app = defaultApp) {
+function currentWebUI(app) {
+    const content = fs.readFileSync(path.join(app, 'build.yaml'), 'utf8');
+    const revision = /WEBUI_REF: "(r\d+)"/.exec(content);
+    const sha256 = /WEBUI_SHA256: "([0-9a-f]{64})"/.exec(content);
+    const minimum = /WEBUI_MIN_SERVER: "(\d+)"/.exec(content);
+    if (!revision || !sha256 || !minimum) throw new Error('Cannot resolve the packaged WebUI pins');
+    return { revision: revision[1], sha256: sha256[1], minimumServer: Number(minimum[1]) };
+}
+
+function pin(version, revision, app = defaultApp, webui) {
     if (!/^\d+\.\d+\.\d+$/.test(version || '')) {
         throw new Error('App version must use major.minor.patch');
     }
@@ -27,22 +36,87 @@ function pin(version, revision, app = defaultApp) {
     replace('Dockerfile', /ARG SOURCE_REF=[0-9a-f]{40}/g, 2, `ARG SOURCE_REF=${revision}`);
     replace('Dockerfile', /ARG BUILD_VERSION=\d+\.\d+\.\d+/g, 1, `ARG BUILD_VERSION=${version}`);
     replace('config.yaml', /^version: "[^"]+"$/gm, 1, `version: "${version}"`);
+    if (webui) {
+        if (!/^r\d+$/.test(webui.revision) || !/^[0-9a-f]{64}$/.test(webui.sha256) ||
+            !Number.isSafeInteger(webui.minimumServer) || webui.minimumServer < 1) {
+            throw new Error('Invalid WebUI revision, digest or server compatibility pin');
+        }
+        replace('build.yaml', /WEBUI_REF: "r\d+"/g, 1, `WEBUI_REF: "${webui.revision}"`);
+        replace('build.yaml', /WEBUI_SHA256: "[0-9a-f]{64}"/g, 1, `WEBUI_SHA256: "${webui.sha256}"`);
+        replace('build.yaml', /WEBUI_MIN_SERVER: "\d+"/g, 1, `WEBUI_MIN_SERVER: "${webui.minimumServer}"`);
+        replace('Dockerfile', /ARG WEBUI_REF=r\d+/g, 2, `ARG WEBUI_REF=${webui.revision}`);
+        replace('Dockerfile', /ARG WEBUI_SHA256=[0-9a-f]{64}/g, 1, `ARG WEBUI_SHA256=${webui.sha256}`);
+        replace('Dockerfile', /ARG WEBUI_MIN_SERVER=\d+/g, 1, `ARG WEBUI_MIN_SERVER=${webui.minimumServer}`);
+    }
     for (const name of files) {
         fs.writeFileSync(path.join(app, name), contents[name].replace(/\r\n/g, '\n'), 'utf8');
     }
     console.log(`Pinned main Suwayomi server ${revision} as HA app ${version}. Commit/push the app-owned files to build and publish.`);
 }
 
-function update(version, serverPath = path.resolve(__dirname, '..', '..', 'Suwayomi-Server'), app = defaultApp) {
+async function githubJson(url, fetcher = fetch) {
+    const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+    const response = await fetcher(url, {
+        headers: {
+            Accept: 'application/vnd.github+json',
+            ...(token && new URL(url).hostname === 'api.github.com' ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) throw new Error(`Upstream metadata request failed with HTTP ${response.status}`);
+    return { data: await response.json(), headers: response.headers };
+}
+
+async function compatibleWebUI(serverVersion, fetcher = fetch) {
+    const mappingResponse = await githubJson(
+        'https://raw.githubusercontent.com/Suwayomi/Suwayomi-WebUI/master/versionToServerVersionMapping.json', fetcher,
+    );
+    if (!Array.isArray(mappingResponse.data)) throw new Error('Invalid upstream WebUI compatibility mapping');
+    const mapping = mappingResponse.data.find(entry =>
+        (entry.uiVersion === 'PREVIEW' || /^r\d+$/.test(entry.uiVersion || '')) &&
+        /^r\d+$/.test(entry.serverVersion || '') && Number(entry.serverVersion.slice(1)) <= serverVersion);
+    if (!mapping) throw new Error('No compatible WebUI is available for the selected server');
+    const releasePath = mapping.uiVersion === 'PREVIEW' ? 'latest' : `tags/${mapping.uiVersion}`;
+    const { data: release } = await githubJson(
+        `https://api.github.com/repos/Suwayomi/Suwayomi-WebUI-preview/releases/${releasePath}`, fetcher,
+    );
+    if (!/^r\d+$/.test(release.tag_name || '') || !Array.isArray(release.assets)) {
+        throw new Error('Invalid upstream preview WebUI release');
+    }
+    const asset = release.assets.find(value => value.name === `Suwayomi-WebUI-${release.tag_name}.zip`);
+    if (!asset || !/^sha256:[0-9a-f]{64}$/.test(asset.digest || '')) {
+        throw new Error('WebUI release is missing a verified SHA-256 digest');
+    }
+    return {
+        revision: release.tag_name, sha256: asset.digest.slice(7),
+        minimumServer: Number(mapping.serverVersion.slice(1)),
+    };
+}
+
+async function serverCommitCount(revision, fetcher = fetch) {
+    const { data, headers } = await githubJson(
+        `https://api.github.com/repos/Suwayomi/Suwayomi-Server/commits?sha=${revision}&per_page=1`, fetcher,
+    );
+    if (!Array.isArray(data) || data.length !== 1 || data[0].sha !== revision) {
+        throw new Error('Cannot verify the selected upstream commit history');
+    }
+    const last = /[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(headers.get('link') || '');
+    const count = last ? Number(last[1]) : 1;
+    if (!Number.isSafeInteger(count) || count < 1) throw new Error('Invalid upstream commit count');
+    return count;
+}
+
+async function update(version, serverPath = path.resolve(__dirname, '..', '..', 'Suwayomi-Server'), app = defaultApp) {
     function git(...arguments) {
         return execFileSync('git', ['-C', serverPath, ...arguments], { encoding: 'utf8' }).trim();
     }
     if (git('status', '--porcelain')) throw new Error('Server checkout has local changes; preserve them before updating');
     git('pull', '--ff-only');
-    pin(version, git('rev-parse', 'HEAD'), app);
+    const webui = await compatibleWebUI(Number(git('rev-list', '--count', 'HEAD')));
+    pin(version, git('rev-parse', 'HEAD'), app, webui);
 }
 
-function latest(app = defaultApp) {
+async function latest(app = defaultApp, fetcher = fetch) {
     const current = /^version: "(\d+\.\d+\.\d+)"$/m.exec(fs.readFileSync(path.join(app, 'config.yaml'), 'utf8'));
     const previous = /SOURCE_REF: "([0-9a-f]{40})"/.exec(fs.readFileSync(path.join(app, 'build.yaml'), 'utf8'));
     if (!current || !previous) throw new Error('Cannot resolve the current app source/version pins');
@@ -51,8 +125,10 @@ function latest(app = defaultApp) {
     ], { encoding: 'utf8' }).trim();
     const revision = /^([0-9a-f]{40})\s+refs\/heads\/master$/.exec(remote);
     if (!revision) throw new Error('Cannot resolve upstream master; package files were not changed');
-    if (revision[1] === previous[1]) {
-        console.log('Upstream server is unchanged; no version bump is needed.');
+    const webui = await compatibleWebUI(await serverCommitCount(revision[1], fetcher), fetcher);
+    const previousWebUI = currentWebUI(app);
+    if (revision[1] === previous[1] && JSON.stringify(webui) === JSON.stringify(previousWebUI)) {
+        console.log('Upstream server and compatible WebUI are unchanged; no version bump is needed.');
         return false;
     }
     const parts = current[1].split('.').map(Number);
@@ -63,23 +139,23 @@ function latest(app = defaultApp) {
     if (!/^# Changelog\r?\n/.test(changelog)) throw new Error('Changelog format changed; package files were not updated');
     const updatedChangelog = changelog.replace(
         /^# Changelog\r?\n/,
-        `# Changelog\n\n## ${version}\n\n- Automatically repackage [upstream Suwayomi server ${revision[1].slice(0, 12)}](https://github.com/Suwayomi/Suwayomi-Server/commit/${revision[1]}) with its matching WebUI.\n- Publish only after amd64 and ARM64 build, ingress/API/browser and USB library-persistence tests pass.\n`,
+        `# Changelog\n\n## ${version}\n\n- Automatically repackage [upstream Suwayomi server ${revision[1].slice(0, 12)}](https://github.com/Suwayomi/Suwayomi-Server/commit/${revision[1]}) with verified compatible WebUI ${webui.revision}.\n- Publish only after amd64 and ARM64 build, ingress/API/browser and USB library-persistence tests pass.\n`,
     );
-    pin(version, revision[1], app);
+    pin(version, revision[1], app, webui);
     fs.writeFileSync(changelogPath, updatedChangelog.replace(/\r\n/g, '\n'), 'utf8');
     return true;
 }
 
 if (require.main === module) {
-    try {
+    (async () => { try {
         if (process.argv[2] === '--latest') {
-            latest();
+            await latest();
         } else {
-            update(process.argv[2], process.argv[3]);
+            await update(process.argv[2], process.argv[3]);
         }
     } catch (error) {
         console.error(error.message);
         process.exitCode = 1;
-    }
+    } })();
 }
-module.exports = { update, pin, latest };
+module.exports = { update, pin, latest, compatibleWebUI, serverCommitCount };

@@ -55,7 +55,7 @@ Empty overrides derive these directories from the selected root:
   downloads/             downloaded manga
   backups/               Suwayomi's automatic backups
   local/                 local manga
-  webUI/                 the matching packaged browser reader
+  webUI/                 the selected packaged or runtime browser reader
 ```
 
 The startup adapter creates only the app-specific folder and its children
@@ -98,6 +98,8 @@ The Configuration tab exposes the storage root/path overrides, credentials,
 direct-access switch, Java heap size, extension store indexes, CBZ downloads,
 source concurrency, update interval, backup schedule/retention, debug logs and
 all external FlareSolverr connection/session/fallback options.
+It also exposes `webui_channel`, `webui_update_check_interval` and
+`embedded_browser_enabled`.
 
 - `jvm_heap_mb` defaults to 768 MiB. This limits Java heap, not total app RAM;
   native/JVM overhead, HA and the shared solver need additional headroom.
@@ -107,10 +109,34 @@ all external FlareSolverr connection/session/fallback options.
   FlareSolverr app; adjust it to your installed app's internal hostname.
   The app reports an unavailable solver but never restarts or replaces it.
 - Use a dedicated `flaresolverr_session_name` to avoid sharing another app's
-  browser session. No solver/Chromium is bundled or launched here.
+  browser session. No solver is bundled or launched here; opt-in CEF uses a
+  separate backend browser only for sources that need it.
 - No third-party extension store is installed automatically. Supply current
   `extension_stores` JSON index URLs, not GitHub repository landing pages or
   the obsolete upstream `extensionRepos` setting.
+
+### WebUI updates and CEF-dependent sources
+
+- `webui_channel: bundled` is the safe default: use the independently verified UI
+  included in the image, with no runtime downloads.
+- Select `stable` or `preview` to enable upstream WebUI downloads. The server uses
+  its compatibility mapping and integrity checks rather than blindly installing
+  an incompatible UI. `webui_update_check_interval` accepts 1-23 hours; zero
+  disables scheduled checks but leaves manual runtime updates available.
+- Changing channels preserves the previous managed `webUI` directory. Runtime
+  mode is remembered outside that directory, so upgrades/restarts do not replace
+  a downloaded UI with an older package. Unknown custom UI trees are not deleted.
+- Runtime UI versions can change without a new HA image and therefore are not
+  all covered by the package release tests. Return to `bundled` for the
+  image-tested UI. An incompatible initial ingress HTML contract fails explicitly.
+- `CEF is disabled` is a backend embedded-browser error, not an Android/WebUI
+  rendering error. FlareSolverr handles Cloudflare HTTP responses but cannot
+  replace all extensions' WebViews.
+- Enable `embedded_browser_enabled` only when needed. Native CEF components are
+  downloaded for the backend architecture and run under a virtual display.
+  Browser memory is additional to `jvm_heap_mb`; keep headroom for HA and the
+  existing solver. First initialization can take several minutes. This does not
+  weaken authentication, enable direct ports or start a second FlareSolverr.
 
 For less common global settings, `advanced_server_settings` accepts a JSON
 object with current upstream names and JSON value types, for example:
@@ -195,12 +221,14 @@ This package does not change your router, firewall, TLS or HA authentication.
 The [workflow](../.github/workflows/suwayomi.yml) runs daily at **04:15 UTC** and
 can be started manually from GitHub Actions. It:
 
-1. Checks upstream master; an unchanged source skips the scheduled rebuild.
-2. Prepares a new source pin, HA patch version and changelog without committing
+1. Checks upstream master and the latest compatible WebUI; a UI-only change also
+   causes a new package build.
+2. Prepares source/UI/digest pins, HA patch version and changelog without committing
    untested metadata to the app store.
 3. Builds native AMD64 and ARM64 candidates from the exact same prepared source.
 4. Runs the HA linter, unit tests, browser/iframe/API/authentication tests and
-   actual library persistence tests for both private and USB storage.
+   actual library persistence tests for both private and USB storage, plus runtime
+   WebUI downloads and opt-in native CEF initialization.
 5. Promotes both passing images, commits the tested metadata update, and creates
    a versioned GitHub release. A failed architecture blocks publication and the
    app-store version change.
@@ -228,7 +256,7 @@ Clone upstream `Suwayomi-Server` beside `Suwayomi-Server-HA`, or pass a checkout
 path as the second argument:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.4
+node .\scripts\update-suwayomi.cjs 0.1.5
 ```
 
 The command rejects dirty checkouts and non-increasing app versions,
@@ -238,12 +266,15 @@ pins and HA app version together. The initial upstream pin is
 server `v2.4.2435` from upstream master/preview, with WebUI `r3518`.
 HA app version and upstream server version are separate identifiers.
 
-The unmodified matching WebUI is extracted at image build time and copied into
+The separately pinned compatible WebUI is extracted at image build time and copied into
 an app-managed ordinary directory, so USB filesystems need no symlink support.
 It is served through upstream Custom UI mode and updates with the app, without
-runtime UI downloads or release drift. On a UI upgrade the previous managed
+runtime UI downloads or release drift in bundled mode. Stable/preview mode instead
+uses the upstream runtime updater. On a UI upgrade the previous managed
 directory is retained as `webUI.previous-*`; unknown pre-existing directories or
 links are preserved and reported as migration errors, not deleted.
+The packaging-only `SERVER-WEBUI-OVERRIDE.gradle` is included with build provenance;
+it changes the downloaded bundle, not the upstream server code or compatibility floor.
 
 ## Local verification and known limits
 

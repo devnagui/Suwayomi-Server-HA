@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       update_upstream:
-        description: Check upstream master and automatically bump the HA patch version
+        description: Check upstream server and compatible WebUI releases, then bump the HA patch version if either changes
         type: boolean
         default: true
 
@@ -29,6 +29,9 @@ jobs:
       changed: ${{ steps.pins.outputs.changed }}
       version: ${{ steps.pins.outputs.version }}
       source: ${{ steps.pins.outputs.source }}
+      webui: ${{ steps.pins.outputs.webui }}
+      webui_sha256: ${{ steps.pins.outputs.webui_sha256 }}
+      webui_min_server: ${{ steps.pins.outputs.webui_min_server }}
       image_base: ${{ steps.pins.outputs.image_base }}
     steps:
       - uses: actions/checkout@v7
@@ -40,7 +43,9 @@ jobs:
           python-version: "3.12"
       - run: pip install -r tests/requirements-suwayomi.txt
       - name: Check upstream without committing untested metadata
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_upstream)
+        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_upstream)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/update-suwayomi.cjs --latest
       - name: Read prepared pins and immutable release state
         id: pins
@@ -72,6 +77,8 @@ jobs:
                       raise
           values = {
               "version": config["version"], "source": build["args"]["SOURCE_REF"],
+              "webui": build["args"]["WEBUI_REF"], "webui_sha256": build["args"]["WEBUI_SHA256"],
+              "webui_min_server": build["args"]["WEBUI_MIN_SERVER"],
               "image_base": "ghcr.io/" + os.environ["GITHUB_REPOSITORY"].lower(),
               "build": str(should_build).lower(), "publish": str(publish).lower(),
               "changed": str(changed).lower(),
@@ -134,6 +141,9 @@ jobs:
           tags: suwayomi-ha:test
           build-args: |
             SOURCE_REF=${{ needs.prepare.outputs.source }}
+            WEBUI_REF=${{ needs.prepare.outputs.webui }}
+            WEBUI_SHA256=${{ needs.prepare.outputs.webui_sha256 }}
+            WEBUI_MIN_SERVER=${{ needs.prepare.outputs.webui_min_server }}
             BUILD_VERSION=${{ needs.prepare.outputs.version }}
             BUILD_ARCH=${{ matrix.arch }}
           cache-from: type=gha,scope=suwayomi-${{ matrix.arch }}
@@ -142,6 +152,10 @@ jobs:
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser
       - name: Verify mounted USB storage and real library persistence
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --usb-storage
+      - name: Verify runtime WebUI downloads and preserved ingress
+        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --webui-channel preview --browser --usb-storage
+      - name: Verify opt-in embedded browser initialization
+        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --embedded-browser --usb-storage
       - name: Verify direct HTTPS, configured certificate and renewal reload
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --tls --usb-storage
       - uses: docker/login-action@v4

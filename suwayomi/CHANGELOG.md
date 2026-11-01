@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.4
+
+- Package the latest compatible WebUI independently of the server source pin;
+  start with verified preview r3569 and record its SHA-256 and build override.
+- Check server and WebUI updates on pushes, daily and manual runs; publish only
+  after native AMD64/ARM64 package, browser/API, storage and TLS tests pass.
+- Add opt-in stable/preview runtime WebUI downloads, with the tested bundled
+  mode preserved by default and previous managed UI trees retained on switches.
+- Add opt-in backend CEF for WebView-dependent sources, including ARM64 browser
+  runtime dependencies and a virtual display. Keep it off by default and verify
+  real embedded-browser initialization before publication.
+- Keep runtime update/browser options separate from ingress and authentication;
+  preserve older installations' bundled mode and disabled embedded browser.
+
 ## 0.1.3
 
 - Add optional direct HTTPS using the existing HA certificate/key through a

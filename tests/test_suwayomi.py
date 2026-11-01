@@ -2,12 +2,14 @@ import ast
 import base64
 import copy
 import importlib.util
+import io
 import json
 import re
 import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -101,13 +103,18 @@ class SuwayomiTests(unittest.TestCase):
             self.assertNotIn(forbidden, MANIFEST)
 
     def test_source_pin_is_consistent(self):
-        pin = yaml.safe_load((APP / "build.yaml").read_text())["args"]["SOURCE_REF"]
+        pins = yaml.safe_load((APP / "build.yaml").read_text())["args"]
+        pin = pins["SOURCE_REF"]
         self.assertRegex(pin, r"^[0-9a-f]{40}$")
         docker = (APP / "Dockerfile").read_text()
         self.assertEqual(re.findall(r"ARG SOURCE_REF=([0-9a-f]+)", docker), [pin, pin])
         self.assertIn(":server:downloadWebUI :server:shadowJar", docker)
         self.assertIn("git rev-parse HEAD", docker)
         self.assertIn(f"ARG BUILD_VERSION={MANIFEST['version']}", docker)
+        self.assertEqual(re.findall(r"ARG WEBUI_REF=(r\d+)", docker), [pins["WEBUI_REF"]] * 2)
+        self.assertIn("ARG WEBUI_SHA256=" + pins["WEBUI_SHA256"], docker)
+        self.assertIn("ARG WEBUI_MIN_SERVER=" + pins["WEBUI_MIN_SERVER"], docker)
+        self.assertIn("--init-script /source/ha-webui.gradle", docker)
 
     def test_standalone_repository_identity_is_consistent(self):
         self.assertEqual(MANIFEST["url"], "https://github.com/devnagui/Suwayomi-Server-HA")
@@ -152,8 +159,10 @@ class SuwayomiTests(unittest.TestCase):
             self.assertEqual(before, {name: (app / name).read_bytes() for name in before})
 
     def test_daily_upstream_check_skips_unchanged_and_updates_changed_source(self):
-        current_source = yaml.safe_load((APP / "build.yaml").read_text())["args"]["SOURCE_REF"]
-        for source, changed in ((current_source, False), ("b" * 40, True)):
+        pins = yaml.safe_load((APP / "build.yaml").read_text())["args"]
+        current_source = pins["SOURCE_REF"]
+        current_ui = pins["WEBUI_REF"]
+        for source, ui, changed in ((current_source, current_ui, False), ("b" * 40, current_ui, True), (current_source, "r9999", True)):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 app = Path(temporary)
                 for name in ("build.yaml", "Dockerfile", "config.yaml", "CHANGELOG.md"):
@@ -161,22 +170,69 @@ class SuwayomiTests(unittest.TestCase):
                 code = (
                     "const cp=require('node:child_process');"
                     "cp.execFileSync=()=>process.argv[3]+'\\trefs/heads/master\\n';"
-                    "const result=require(process.argv[1]).latest(process.argv[2]);"
-                    "if(String(result)!==process.argv[4])process.exit(2);"
+                    "global.fetch=async(url)=>{"
+                    "if(url.includes('/commits?'))return new Response(JSON.stringify([{sha:process.argv[3]}]),{headers:{link:'<https://api.github.com/commits?page=2435>; rel=\"last\"'}});"
+                    "if(url.includes('versionToServerVersionMapping'))return new Response(JSON.stringify([{uiVersion:'PREVIEW',serverVersion:'r'+process.argv[7]}]));"
+                    "return new Response(JSON.stringify({tag_name:process.argv[5],assets:[{name:'Suwayomi-WebUI-'+process.argv[5]+'.zip',digest:'sha256:'+process.argv[6]}]}));};"
+                    "require(process.argv[1]).latest(process.argv[2]).then(result=>{if(String(result)!==process.argv[4])process.exit(2)}).catch(e=>{console.error(e);process.exit(3)});"
                 )
                 result = subprocess.run(
-                    ["node", "-e", code, str(ROOT / "scripts" / "update-suwayomi.cjs"), str(app), source, str(changed).lower()],
+                    ["node", "-e", code, str(ROOT / "scripts" / "update-suwayomi.cjs"), str(app), source, str(changed).lower(), ui, pins["WEBUI_SHA256"], pins["WEBUI_MIN_SERVER"]],
                     capture_output=True, text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                pins = yaml.safe_load((app / "build.yaml").read_text())
-                self.assertEqual(pins["args"]["SOURCE_REF"], source)
+                updated_pins = yaml.safe_load((app / "build.yaml").read_text())
+                self.assertEqual(updated_pins["args"]["SOURCE_REF"], source)
+                self.assertEqual(updated_pins["args"]["WEBUI_REF"], ui)
                 version = yaml.safe_load((app / "config.yaml").read_text())["version"]
                 parts = [int(part) for part in MANIFEST["version"].split(".")]
                 parts[2] += int(changed)
                 self.assertEqual(version, ".".join(str(part) for part in parts))
                 if changed:
                     self.assertIn(source, (app / "CHANGELOG.md").read_text())
+                    self.assertIn(ui, (app / "CHANGELOG.md").read_text())
+
+    def test_ui_update_failures_do_not_modify_package_pins(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary)
+            for name in ("build.yaml", "Dockerfile", "config.yaml", "CHANGELOG.md"):
+                shutil.copyfile(APP / name, app / name)
+            before = {name: (app / name).read_bytes() for name in ("build.yaml", "Dockerfile", "config.yaml", "CHANGELOG.md")}
+            source = yaml.safe_load((APP / "build.yaml").read_text())["args"]["SOURCE_REF"]
+            code = (
+                "const cp=require('node:child_process');"
+                "cp.execFileSync=()=>process.argv[3]+'\\trefs/heads/master\\n';"
+                "global.fetch=async()=>new Response('rate limited',{status:429});"
+                "require(process.argv[1]).latest(process.argv[2])"
+                ".then(()=>process.exit(2)).catch(e=>{if(!e.message.includes('429'))process.exit(3)});"
+            )
+            result = subprocess.run(
+                ["node", "-e", code, str(ROOT / "scripts" / "update-suwayomi.cjs"), str(app), source],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(before, {name: (app / name).read_bytes() for name in before})
+
+    def test_compatible_ui_selection_rejects_a_missing_digest_and_uses_supported_floor(self):
+        code = (
+            "const helper=require(process.argv[1]);"
+            "const mapping=[{uiVersion:'PREVIEW',serverVersion:'r2500'},{uiVersion:'r3518',serverVersion:'r2320'}];"
+            "const urls=[];"
+            "const fetcher=async url=>{urls.push(url);return new Response(JSON.stringify("
+            "url.includes('Mapping.json')?mapping:{tag_name:'r3518',assets:[{name:'Suwayomi-WebUI-r3518.zip',digest:'sha256:'+'a'.repeat(64)}]}));};"
+            "(async()=>{"
+            "const result=await helper.compatibleWebUI(2435,fetcher);"
+            "if(result.revision!=='r3518'||result.minimumServer!==2320||!urls.some(u=>u.endsWith('tags/r3518')))process.exit(2);"
+            "try{await helper.compatibleWebUI(2435,async url=>new Response(JSON.stringify("
+            "url.includes('Mapping.json')?mapping:{tag_name:'r3518',assets:[]})));process.exit(3)}"
+            "catch(e){if(!e.message.includes('SHA-256'))throw e}"
+            "})().catch(e=>{console.error(e);process.exit(4)});"
+        )
+        result = subprocess.run(
+            ["node", "-e", code, str(ROOT / "scripts" / "update-suwayomi.cjs")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_translations_cover_every_ha_option(self):
         translations = yaml.safe_load((APP / "translations" / "en.yaml").read_text())
@@ -371,6 +427,151 @@ class SuwayomiTests(unittest.TestCase):
                 runner.prepare_path(str(media / "usb" / "suwayomi"), (media,))
             self.assertFalse((media / "usb" / "suwayomi").exists())
 
+    def test_runtime_webui_options_preserve_bundled_defaults_and_enable_upstream_updates(self):
+        for channel in ("bundled", "stable", "preview"):
+            configured = options() | {"webui_channel": channel}
+            settings = runner.build_settings(configured, SUPPORTED)
+            self.assertEqual(settings["webUIChannel"], channel.upper())
+            self.assertEqual(settings["webUIFlavor"], "CUSTOM" if channel == "bundled" else "WEBUI")
+            self.assertEqual(settings["webUIUpdateCheckInterval"], 0 if channel == "bundled" else 23)
+            self.assertFalse(settings["kcefEnabled"])
+            self.assertEqual(settings["authMode"], "BASIC_AUTH")
+        legacy = {key: value for key, value in options().items() if key not in runner.WEBUI_DEFAULTS}
+        self.assertEqual(runner.build_settings(legacy, SUPPORTED)["webUIChannel"], "BUNDLED")
+        configured = options() | {"webui_channel": "preview", "webui_update_check_interval": 0}
+        self.assertEqual(runner.build_settings(configured, SUPPORTED)["webUIUpdateCheckInterval"], 0)
+
+    def test_runtime_webui_options_reject_invalid_modes_intervals_and_overrides(self):
+        for key, value in (("webui_channel", "other"), ("webui_channel", True), ("webui_update_check_interval", -1), ("webui_update_check_interval", 24), ("webui_update_check_interval", True)):
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                runner.build_settings(options() | {key: value}, SUPPORTED)
+        for key in ("webUIFlavor", "webUIChannel", "webUIUpdateCheckInterval"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "managed"):
+                runner.build_settings(options() | {"advanced_server_settings": json.dumps({key: "PREVIEW"})}, SUPPORTED)
+
+    def test_embedded_browser_is_opt_in_and_uses_a_virtual_display(self):
+        configured = options()
+        self.assertFalse(runner.build_settings(configured, SUPPORTED)["kcefEnabled"])
+        configured["embedded_browser_enabled"] = True
+        self.assertTrue(runner.build_settings(configured, SUPPORTED)["kcefEnabled"])
+        self.assertEqual(runner.java_command(False), ["java", "@/run/suwayomi/java.args"])
+        self.assertEqual(runner.java_command(True)[0], "xvfb-run")
+        self.assertEqual(runner.java_command(True)[-2:], ["java", "@/run/suwayomi/java.args"])
+        with self.assertRaisesRegex(ValueError, "embedded_browser_enabled"):
+            runner.build_settings(options() | {"embedded_browser_enabled": "true"}, SUPPORTED)
+        legacy = {key: value for key, value in options().items() if key not in runner.OPTION_DEFAULTS}
+        self.assertFalse(runner.build_settings(legacy, SUPPORTED)["kcefEnabled"])
+
+    def test_child_shutdown_terminates_the_complete_process_group(self):
+        class Child:
+            pid = 12345
+            def poll(self):
+                return None
+        with patch.object(runner.os, "killpg", create=True) as kill:
+            runner.terminate_child(Child())
+            kill.assert_called_once_with(12345, runner.signal.SIGTERM)
+
+    def test_runtime_mode_transitions_preserve_previous_ui_and_do_not_restore_stale_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            packaged = root / "packaged"
+            packaged.mkdir()
+            (packaged / "index.html").write_text('<base href="/">')
+            (packaged / "revision").write_text("r-bundled")
+            target = root / "webUI"
+            runner.prepare_selected_webui(target, "bundled", packaged)
+            runner.prepare_selected_webui(target, "preview", packaged)
+            self.assertFalse(target.exists(), "Runtime first boot must use upstream initial download")
+            self.assertEqual(len(list(root.glob("webUI.previous-bundled-*"))), 1)
+            target.mkdir()
+            (target / "index.html").write_text('<base href="/">')
+            (target / "revision").write_text("r-runtime")
+            runner.prepare_selected_webui(target, "preview", packaged)
+            self.assertEqual((target / "revision").read_text(), "r-runtime")
+            runner.prepare_selected_webui(target, "bundled", packaged)
+            self.assertEqual((target / "revision").read_text(), "r-bundled")
+            previous = list(root.glob("webUI.previous-preview-*"))
+            self.assertEqual(len(previous), 1)
+            self.assertEqual((previous[0] / "revision").read_text(), "r-runtime")
+
+    def test_runtime_mode_preserves_unmanaged_content_and_invalid_markers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "webUI"
+            target.mkdir()
+            (target / "keep").write_text("user content")
+            with self.assertRaisesRegex(ValueError, "preserved"):
+                runner.prepare_selected_webui(target, "preview")
+            self.assertEqual((target / "keep").read_text(), "user content")
+            (root / ".ha-webui-mode.json").write_text('{"channel":"invalid"}')
+            with self.assertRaisesRegex(ValueError, "marker"):
+                runner.prepare_selected_webui(target, "preview")
+            self.assertEqual((target / "keep").read_text(), "user content")
+
+    def test_switching_to_a_missing_bundle_preserves_the_active_runtime_ui(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "webUI"
+            runner.prepare_selected_webui(target, "preview")
+            target.mkdir()
+            (target / "index.html").write_text("runtime UI")
+            with self.assertRaisesRegex(ValueError, "preserved"):
+                runner.prepare_selected_webui(target, "bundled", root / "missing")
+            self.assertEqual((target / "index.html").read_text(), "runtime UI")
+            self.assertEqual(json.loads((root / ".ha-webui-mode.json").read_text())["channel"], "preview")
+
+    def test_ui_build_override_checks_compatibility_and_does_not_modify_upstream_source(self):
+        spec = importlib.util.spec_from_file_location("package_builder", APP / "build_source.py")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            constants = root / "buildSrc/src/main/kotlin/Constants.kt"
+            constants.parent.mkdir(parents=True)
+            original = 'val webUIRevisionTag = "r3518"\n'
+            constants.write_text(original)
+            payload = b"test-only webui archive"
+            digest = builder.hashlib.sha256(payload).hexdigest()
+            with patch.object(builder.subprocess, "check_output", return_value="2435"), patch.object(
+                builder.urllib.request, "urlopen", return_value=io.BytesIO(payload)
+            ):
+                builder.pin_webui(root, "r3569", 2366, digest)
+                with self.assertRaisesRegex(SystemExit, "newer"):
+                    builder.pin_webui(root, "r3569", 2500, digest)
+            self.assertEqual(constants.read_text(), original)
+            self.assertIn("enabled = false", (root / "ha-webui.gradle").read_text())
+            self.assertEqual((root / "server/src/main/resources/WebUI.zip").read_bytes(), payload)
+
+    def test_packaged_ui_digest_revision_and_provenance_are_verified(self):
+        spec = importlib.util.spec_from_file_location("package_builder", APP / "build_source.py")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            jars = source / "server/build"
+            jars.mkdir(parents=True)
+            (source / "LICENSE").write_text("test-only license fixture")
+            (source / "ha-webui.gradle").write_text("test-only override fixture")
+            ui = io.BytesIO()
+            with zipfile.ZipFile(ui, "w") as archive:
+                archive.writestr("index.html", '<base href="/">')
+                archive.writestr("revision", "r3569")
+            with zipfile.ZipFile(jars / "server.jar", "w") as archive:
+                archive.writestr("WebUI.zip", ui.getvalue())
+                archive.writestr("server-reference.conf", "\n".join(f"server.setting{index}=true" for index in range(40)))
+                archive.writestr("META-INF/MANIFEST.MF", "Specification-Version: v2.4.2435\n")
+            with patch.object(builder.subprocess, "check_output", return_value="a" * 40):
+                with self.assertRaisesRegex(SystemExit, "SHA-256"):
+                    builder.package(source, root / "bad", "r3569", "f" * 64)
+                digest = builder.hashlib.sha256(ui.getvalue()).hexdigest()
+                with self.assertRaisesRegex(SystemExit, "revision"):
+                    builder.package(source, root / "bad", "r9999", digest)
+                builder.package(source, root / "output", "r3569", digest)
+            metadata = json.loads((root / "output/build-info.json").read_text())
+            self.assertEqual(metadata["webui_revision"], "r3569")
+            self.assertEqual(metadata["webui_sha256"], digest)
+            self.assertTrue((root / "output/SERVER-WEBUI-OVERRIDE.gradle").is_file())
 
 if __name__ == "__main__":
     unittest.main()

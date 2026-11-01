@@ -17,6 +17,7 @@ from typing import Any
 
 
 OPTION_SETTINGS = {
+    "embedded_browser_enabled": "kcefEnabled",
     "downloads_path": "downloadsPath",
     "backup_path": "backupPath",
     "local_source_path": "localSourcePath",
@@ -45,10 +46,11 @@ FIXED_SETTINGS = {
     "webUISubpath": "",
     "initialOpenInBrowserEnabled": False,
     "systemTrayEnabled": False,
-    "kcefEnabled": False,
     "authMode": "BASIC_AUTH",
 }
-EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path", "ssl", "certfile", "keyfile"}
+WEBUI_DEFAULTS = {"webui_channel": "bundled", "webui_update_check_interval": 23}
+OPTION_DEFAULTS = WEBUI_DEFAULTS | {"embedded_browser_enabled": False}
+EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path", "ssl", "certfile", "keyfile"} | set(WEBUI_DEFAULTS)
 RESERVED_SETTINGS = set(OPTION_SETTINGS.values()) | set(FIXED_SETTINGS) | {
     "rootDir", "authUsername", "authPassword", "basicAuthEnabled", "basicAuthUsername", "basicAuthPassword"
 }
@@ -93,6 +95,7 @@ def storage_paths(options: dict[str, Any]) -> dict[str, str]:
 
 
 def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, Any]:
+    options = OPTION_DEFAULTS | options
     expected = set(OPTION_SETTINGS) | EXTRA_OPTIONS
     if set(options) != expected:
         raise ValueError("HA options do not match this app version; check the Configuration tab")
@@ -102,10 +105,11 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
         raise ValueError("auth_username must contain 1-64 letters, digits, dots, underscores or hyphens")
     if not isinstance(password, str) or not 12 <= len(password) <= 256 or any(ord(c) < 32 or ord(c) == 127 for c in password):
         raise ValueError("Set auth_password to 12-256 characters without control characters before starting")
-    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl"):
+    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl", "embedded_browser_enabled"):
         if type(options[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
     for key, minimum, maximum in (
+        ("webui_update_check_interval", 0, 23),
         ("jvm_heap_mb", 256, 1536),
         ("max_sources_in_parallel", 1, 64),
         ("backup_interval", 0, 36500),
@@ -116,6 +120,9 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
         if type(options[key]) is not int or not minimum <= options[key] <= maximum:
             raise ValueError(f"{key} must be an integer in {minimum}..{maximum}")
     interval = options["global_update_interval"]
+    channel = options["webui_channel"]
+    if not isinstance(channel, str) or channel not in ("bundled", "stable", "preview"):
+        raise ValueError("webui_channel must be bundled, stable or preview")
     if type(interval) not in (int, float) or not math.isfinite(interval) or interval < 0:
         raise ValueError("global_update_interval must be a finite non-negative number")
     if not isinstance(options["backup_time"], str) or not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", options["backup_time"]):
@@ -142,6 +149,9 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
         if key not in supported:
             raise ValueError(f"Unknown or deprecated global server setting: {key}")
     settings = advanced | {setting: options[option] for option, setting in OPTION_SETTINGS.items()} | FIXED_SETTINGS
+    settings["webUIFlavor"] = "CUSTOM" if channel == "bundled" else "WEBUI"
+    settings["webUIChannel"] = channel.upper()
+    settings["webUIUpdateCheckInterval"] = 0 if channel == "bundled" else options["webui_update_check_interval"]
     paths = storage_paths(options)
     settings["rootDir"] = paths["storage_path"]
     for key in ("downloads_path", "backup_path", "local_source_path"):
@@ -234,6 +244,21 @@ def java_arguments(settings: dict[str, Any], heap: int) -> str:
     return "\n".join('"' + argument.replace("\\", "\\\\").replace('"', '\\"') + '"' for argument in arguments) + "\n"
 
 
+def java_command(embedded_browser: bool) -> list[str]:
+    command = ["java", "@/run/suwayomi/java.args"]
+    if embedded_browser:
+        command = ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x720x24", *command]
+    return command
+
+
+def terminate_child(child: subprocess.Popen) -> None:
+    if child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
 def prepare_webui(target: Path, packaged: Path = Path("/app/webui")) -> None:
     if not (packaged / "index.html").is_file():
         raise ValueError("The packaged server WebUI is missing")
@@ -261,6 +286,43 @@ def prepare_webui(target: Path, packaged: Path = Path("/app/webui")) -> None:
         staging.rename(target)
     except OSError:
         if previous is not None:
+            previous.rename(target)
+        raise
+
+
+def prepare_selected_webui(target: Path, channel: str, packaged: Path = Path("/app/webui")) -> None:
+    if channel not in ("bundled", "stable", "preview"):
+        raise ValueError("Unknown WebUI channel")
+    if channel == "bundled" and (
+        not (packaged / "index.html").is_file() or not (packaged / "revision").is_file()
+    ):
+        raise ValueError("The packaged WebUI is missing; existing content is preserved")
+    state_file = target.with_name(".ha-webui-mode.json")
+    if target.is_symlink() or state_file.is_symlink():
+        raise ValueError("Existing WebUI link or mode link is preserved; move it aside before changing modes")
+    previous_channel = "bundled"
+    if state_file.exists():
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or set(state) != {"channel"} or state["channel"] not in ("bundled", "stable", "preview"):
+            raise ValueError("Invalid managed WebUI mode marker; existing content is preserved")
+        previous_channel = state["channel"]
+    if target.exists() and (
+        not target.is_dir() or
+        not state_file.exists() and not (target / ".ha-webui-package.json").is_file()
+    ):
+        raise ValueError("Existing unmanaged WebUI content is preserved; move it aside before selecting a channel")
+    previous = None
+    if target.exists() and channel != previous_channel:
+        previous = target.with_name(f"{target.name}.previous-{previous_channel}-{time.time_ns()}")
+        target.rename(previous)
+    try:
+        if channel == "bundled":
+            prepare_webui(target, packaged)
+        staging = state_file.with_name(f"{state_file.name}.staging-{time.time_ns()}")
+        staging.write_text(json.dumps({"channel": channel}) + "\n", encoding="utf-8")
+        staging.replace(state_file)
+    except OSError:
+        if previous is not None and not target.exists():
             previous.rename(target)
         raise
 
@@ -300,9 +362,11 @@ def wait_ready(java: subprocess.Popen, authorization: str) -> None:
             with urllib.request.urlopen(request, timeout=3) as response:
                 body = response.read()
             if response.status == 200 and b"<base " in body:
+                if body.count(b'<base href="/">') != 1 or re.search(rb'(?:src|href|data-src)=["\']/assets/', body):
+                    raise RuntimeError("Selected WebUI ingress markup contract changed; no proxy was started")
                 assets = set(re.findall(rb'(?:src|href|data-src)="(\./[^"]+)"', body))
                 if not assets:
-                    raise RuntimeError("Packaged WebUI has no recognized initial assets")
+                    raise RuntimeError("Selected WebUI has no recognized initial assets")
                 for asset in assets:
                     asset_request = urllib.request.Request(
                         "http://127.0.0.1:4568" + asset.decode("utf-8")[1:],
@@ -324,7 +388,7 @@ def wait_ready(java: subprocess.Popen, authorization: str) -> None:
 
 def main() -> None:
     os.umask(0o077)
-    options = json.loads(Path("/data/options.json").read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    options = OPTION_DEFAULTS | json.loads(Path("/data/options.json").read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     metadata = json.loads(Path("/app/build-info.json").read_text(encoding="utf-8"))
     settings = build_settings(options, set(metadata["server_settings"]))
     tls = certificate_paths(options)
@@ -332,7 +396,7 @@ def main() -> None:
         subprocess.run(["openssl", "x509", "-in", str(tls[0]), "-noout", "-checkend", "0"], check=True)
     paths = storage_paths(options)
     storage = prepare_path(paths["storage_path"])
-    prepare_webui(storage / "webUI")
+    prepare_selected_webui(storage / "webUI", options["webui_channel"])
     for key in ("downloads_path", "backup_path", "local_source_path"):
         prepare_path(paths[key])
     runtime = Path("/run/suwayomi")
@@ -348,7 +412,11 @@ def main() -> None:
     nginx = render_nginx(Path("/app/nginx.conf").read_text(encoding="utf-8"), options["auth_username"], options["auth_password"], options["direct_access_enabled"], tls)
     private_file(runtime / "nginx.conf", nginx)
     subprocess.run(["nginx", "-t", "-c", str(runtime / "nginx.conf")], check=True)
-    print(f'Starting Suwayomi {metadata["source_revision"][:12]} / WebUI {metadata["webui_revision"]}', flush=True)
+    print(
+        f'Starting Suwayomi {metadata["source_revision"][:12]} / WebUI channel {options["webui_channel"]} '
+        f'(bundled fallback {metadata["webui_revision"]})',
+        flush=True,
+    )
     children: list[subprocess.Popen] = []
     stopping = False
 
@@ -356,19 +424,18 @@ def main() -> None:
         nonlocal stopping
         stopping = True
         for child in children:
-            if child.poll() is None:
-                child.terminate()
+            terminate_child(child)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        java = subprocess.Popen(["java", "@" + str(runtime / "java.args")], user=1001, group=1001)
+        java = subprocess.Popen(java_command(options["embedded_browser_enabled"]), user=1001, group=1001, start_new_session=True)
         children.append(java)
         authorization = base64.b64encode(f'{options["auth_username"]}:{options["auth_password"]}'.encode("utf-8")).decode("ascii")
         wait_ready(java, authorization)
         if stopping:
             return
-        proxy = subprocess.Popen(["nginx", "-c", str(runtime / "nginx.conf"), "-g", "daemon off;"])
+        proxy = subprocess.Popen(["nginx", "-c", str(runtime / "nginx.conf"), "-g", "daemon off;"], start_new_session=True)
         children.append(proxy)
         tls_fingerprint = certificate_fingerprint(tls) if tls is not None else None
         tls_check_at = time.monotonic() + 60
@@ -404,7 +471,10 @@ def main() -> None:
                 child.wait(timeout=45)
             except subprocess.TimeoutExpired:
                 print("WARNING: Process exceeded its shutdown deadline; terminating it.", file=sys.stderr, flush=True)
-                child.kill()
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 child.wait()
 
 
