@@ -154,8 +154,6 @@ jobs:
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --usb-storage
       - name: Verify runtime WebUI downloads and preserved ingress
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --webui-channel preview --browser --usb-storage
-      - name: Verify opt-in embedded browser initialization
-        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --embedded-browser --usb-storage
       - name: Verify direct HTTPS, configured certificate and renewal reload
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --tls --usb-storage
       - uses: docker/login-action@v4

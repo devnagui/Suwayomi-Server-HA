@@ -8,13 +8,11 @@
   after native AMD64/ARM64 package, browser/API, storage and TLS tests pass.
 - Add opt-in stable/preview runtime WebUI downloads, with the tested bundled
   mode preserved by default and previous managed UI trees retained on switches.
-- Add opt-in backend CEF for WebView-dependent sources, including ARM64 browser
-  runtime dependencies and a virtual display. Keep it off by default and verify
-  real embedded-browser initialization before publication.
-- Keep runtime update/browser options separate from ingress and authentication;
+- Keep runtime update options separate from ingress and authentication;
   preserve older installations' bundled mode and disabled embedded browser.
-- Supervise Java directly when CEF is enabled and keep its authenticated virtual
-  display alive until Java has finished flushing the database during shutdown.
+- Exclude experimental CEF support after intermittent native restart/persistence
+  failures; do not weaken release gates or expose an unvalidated enable switch.
+- Preserve direct Java supervision and report backend persistence errors explicitly.
 
 ## 0.1.3
 

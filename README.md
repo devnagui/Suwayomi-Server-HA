@@ -18,8 +18,8 @@ the optional authenticated server API.
 - AMD64 and ARM64/aarch64 images, including Raspberry Pi 4/5.
 - Configurable storage root: keep database, library, downloads, backups and
   local manga in an app-specific folder on an existing mounted USB disk.
-- Reuse an existing FlareSolverr service. An embedded browser for WebView sources
-  is optional and disabled by default; no second solver is started.
+- Reuse an existing FlareSolverr service; no second solver or embedded Chromium
+  is started.
 - Optional direct access, disabled and unmapped by default, with mandatory
   authentication. Enable HTTPS with the existing HA certificates before
   Internet forwarding, or use a trusted HTTPS reverse proxy.
@@ -67,10 +67,10 @@ workflow**. Keep `update_upstream` enabled to check the latest upstream source.
 Runtime downloads can be enabled in HA Configuration with
 `webui_channel: preview` (or `stable`) and
 `webui_update_check_interval: 23`. The upstream server selects a compatible UI.
-Use `embedded_browser_enabled: true` only for sources that need CEF; it runs on
-the backend, so a disabled-CEF error can also appear in Android clients.
-CEF uses extra RAM beyond Java heap and downloads its native components on first
-initialization, so leave it off when unnecessary on a 4 GiB Raspberry Pi.
+CEF-dependent sources still require a separately supported backend: experimental
+embedded-browser support did not consistently pass restart/persistence checks
+and is not included in this release. A disabled-CEF error can appear in Android
+as well as WebUI; runtime WebUI updates do not enable CEF.
 
 No personal token, local compiler or running controller is needed by the
 scheduled workflow: it uses GitHub's scoped workflow token.

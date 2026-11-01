@@ -449,59 +449,24 @@ class SuwayomiTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "managed"):
                 runner.build_settings(options() | {"advanced_server_settings": json.dumps({key: "PREVIEW"})}, SUPPORTED)
 
-    def test_embedded_browser_is_opt_in_and_uses_a_virtual_display(self):
-        configured = options()
-        self.assertFalse(runner.build_settings(configured, SUPPORTED)["kcefEnabled"])
-        configured["embedded_browser_enabled"] = True
-        self.assertTrue(runner.build_settings(configured, SUPPORTED)["kcefEnabled"])
-        self.assertEqual(runner.java_command(), ["java", "@/run/suwayomi/java.args"])
-        with self.assertRaisesRegex(ValueError, "embedded_browser_enabled"):
-            runner.build_settings(options() | {"embedded_browser_enabled": "true"}, SUPPORTED)
-        legacy = {key: value for key, value in options().items() if key not in runner.OPTION_DEFAULTS}
-        self.assertFalse(runner.build_settings(legacy, SUPPORTED)["kcefEnabled"])
+    def test_embedded_browser_remains_disabled_until_restart_safety_is_proven(self):
+        for channel in ("bundled", "stable", "preview"):
+            self.assertFalse(runner.build_settings(options() | {"webui_channel": channel}, SUPPORTED)["kcefEnabled"])
+        with self.assertRaisesRegex(ValueError, "managed"):
+            runner.build_settings(options() | {"advanced_server_settings": '{"kcefEnabled":true}'}, SUPPORTED)
+        self.assertNotIn("embedded_browser_enabled", MANIFEST["options"])
+        self.assertNotIn("xvfb", (APP / "Dockerfile").read_text().lower())
 
-    def test_virtual_display_is_a_separate_authenticated_non_tcp_process(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            runtime = Path(temporary)
-            with patch.object(runner.os, "chown", create=True), patch.object(runner, "private_file") as private, patch.object(
-                runner.subprocess, "run"
-            ) as xauth, patch.object(runner.subprocess, "Popen") as start, patch.object(
-                runner.select, "select", return_value=([True], [], [])
-            ):
-                start.return_value.stdout.readline.return_value = "99\n"
-                display = runner.start_virtual_display(runtime)
-                self.assertIs(display, start.return_value)
-                private.assert_called_once_with(runtime / "display" / "Xauthority", "", uid=1001, gid=1001)
-                self.assertEqual(xauth.call_args.args[0], ["xauth", "-f", str(runtime / "display" / "Xauthority")])
-                self.assertRegex(xauth.call_args.kwargs["input"], r"^add :99 \. [a-f0-9]{32}\n$")
-                command = start.call_args.args[0]
-                self.assertEqual(command[:4], ["Xvfb", ":99", "-displayfd", "1"])
-                self.assertIn("-nolisten", command)
-                self.assertIn("tcp", command)
-                self.assertIn("-auth", command)
-                self.assertTrue(start.call_args.kwargs["start_new_session"])
-                display.stdout.close.assert_called_once()
-
-    def test_virtual_display_failure_stops_its_owned_process(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with patch.object(runner.os, "chown", create=True), patch.object(runner, "private_file"), patch.object(runner.subprocess, "run"), patch.object(
-                runner.subprocess, "Popen"
-            ) as start, patch.object(runner.select, "select", return_value=([], [], [])), patch.object(
-                runner, "terminate_child"
-            ) as stop:
-                with self.assertRaisesRegex(RuntimeError, "did not become ready"):
-                    runner.start_virtual_display(Path(temporary))
-                stop.assert_called_once_with(start.return_value)
-                start.return_value.wait.assert_called_once_with(timeout=5)
-
-    def test_child_shutdown_terminates_the_complete_process_group(self):
+    def test_child_shutdown_signals_its_directly_supervised_process(self):
         class Child:
-            pid = 12345
+            terminated = False
             def poll(self):
                 return None
-        with patch.object(runner.os, "killpg", create=True) as kill:
-            runner.terminate_child(Child())
-            kill.assert_called_once_with(12345, runner.signal.SIGTERM)
+            def terminate(self):
+                self.terminated = True
+        child = Child()
+        runner.terminate_child(child)
+        self.assertTrue(child.terminated)
 
     def test_runtime_mode_transitions_preserve_previous_ui_and_do_not_restore_stale_bundle(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -23,9 +23,6 @@ configuration:
   webui_channel:
     name: WebUI update channel
     description: Bundled keeps the tested image UI. Stable or preview enables upstream-compatible runtime downloads without replacing the server image; previous managed UI directories are retained on channel changes.
-  embedded_browser_enabled:
-    name: Enable embedded browser for manga sources
-    description: Opt-in CEF support for sources requiring WebViews. Downloads native browser components on first use and consumes additional RAM beyond the Java heap. Keep off unless needed, especially on a 4 GiB Pi.
   webui_update_check_interval:
     name: Runtime WebUI update interval (hours)
     description: Automatic checks and downloads every 1-23 hours in stable/preview mode. Zero leaves updates manual. Bundled mode never downloads a UI.

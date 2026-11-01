@@ -79,7 +79,6 @@ def main() -> None:
     parser.add_argument("--usb-storage", action="store_true")
     parser.add_argument("--tls", action="store_true")
     parser.add_argument("--webui-channel", choices=("bundled", "stable", "preview"), default="bundled")
-    parser.add_argument("--embedded-browser", action="store_true")
     parser.add_argument("--browser-seconds", type=int, default=0)
     arguments = parser.parse_args()
     if arguments.tls and arguments.browser:
@@ -110,8 +109,6 @@ def main() -> None:
             flaresolverr_url="http://172.30.32.2:8191",
             ssl=arguments.tls,
             webui_channel=arguments.webui_channel,
-            embedded_browser_enabled=arguments.embedded_browser,
-            debug_logs_enabled=arguments.embedded_browser,
         )
         tls_directory = data / "ssl"
         tls_mounts = []
@@ -157,18 +154,6 @@ def main() -> None:
             scheme = "https" if arguments.tls else "http"
             direct_url = scheme + "://127.0.0.1:" + direct_port
             wait_for_app(app, direct_url + "/", 200, authorization)
-            if arguments.embedded_browser:
-                deadline = time.monotonic() + 300
-                while time.monotonic() < deadline:
-                    cef_logs = docker("logs", app)
-                    if "CEF: Initialization state INITIALIZED" in cef_logs:
-                        break
-                    if "Failed to set up CEF" in cef_logs or "Platform not supported by CEF" in cef_logs:
-                        raise RuntimeError("The opt-in embedded browser failed to initialize")
-                    time.sleep(1)
-                else:
-                    raise RuntimeError("Embedded browser did not initialize within 300 seconds")
-                print("PASS: opt-in native embedded browser initialized under its virtual display", flush=True)
             assert request(direct_url + "/")[0] == 401, "Direct access must require authentication"
             assert request(direct_url + "/api/graphql", ingress=PREFIX)[0] == 401, "Ingress headers bypassed direct authentication"
             assert request(direct_url + "/", base64.b64encode(b"wrong:wrong").decode())[0] == 401
@@ -190,7 +175,7 @@ def main() -> None:
             assert active["aboutServer"] == {"version": metadata["server_version"]}
             assert active["settings"] == {
                 "flareSolverrEnabled": True, "flareSolverrUrl": options["flaresolverr_url"],
-                "kcefEnabled": arguments.embedded_browser,
+                "kcefEnabled": False,
                 "webUIFlavor": "CUSTOM" if arguments.webui_channel == "bundled" else "WEBUI",
                 "webUIChannel": arguments.webui_channel.upper(),
                 "webUIUpdateCheckInterval": 0.0 if arguments.webui_channel == "bundled" else 23.0,

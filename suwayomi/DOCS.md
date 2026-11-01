@@ -98,8 +98,7 @@ The Configuration tab exposes the storage root/path overrides, credentials,
 direct-access switch, Java heap size, extension store indexes, CBZ downloads,
 source concurrency, update interval, backup schedule/retention, debug logs and
 all external FlareSolverr connection/session/fallback options.
-It also exposes `webui_channel`, `webui_update_check_interval` and
-`embedded_browser_enabled`.
+It also exposes `webui_channel` and `webui_update_check_interval`.
 
 - `jvm_heap_mb` defaults to 768 MiB. This limits Java heap, not total app RAM;
   native/JVM overhead, HA and the shared solver need additional headroom.
@@ -109,8 +108,7 @@ It also exposes `webui_channel`, `webui_update_check_interval` and
   FlareSolverr app; adjust it to your installed app's internal hostname.
   The app reports an unavailable solver but never restarts or replaces it.
 - Use a dedicated `flaresolverr_session_name` to avoid sharing another app's
-  browser session. No solver is bundled or launched here; opt-in CEF uses a
-  separate backend browser only for sources that need it.
+  browser session. No solver or embedded Chromium is bundled or launched here.
 - No third-party extension store is installed automatically. Supply current
   `extension_stores` JSON index URLs, not GitHub repository landing pages or
   the obsolete upstream `extensionRepos` setting.
@@ -132,11 +130,11 @@ It also exposes `webui_channel`, `webui_update_check_interval` and
 - `CEF is disabled` is a backend embedded-browser error, not an Android/WebUI
   rendering error. FlareSolverr handles Cloudflare HTTP responses but cannot
   replace all extensions' WebViews.
-- Enable `embedded_browser_enabled` only when needed. Native CEF components are
-  downloaded for the backend architecture and run under a virtual display.
-  Browser memory is additional to `jvm_heap_mb`; keep headroom for HA and the
-  existing solver. First initialization can take several minutes. This does not
-  weaken authentication, enable direct ports or start a second FlareSolverr.
+- CEF remains disabled. Experimental support initialized successfully, but
+  CEF-enabled native restart/persistence tests intermittently failed. It was
+  excluded rather than weakening the release gates. Extensions requiring CEF
+  need a separately supported backend until restart safety is verified.
+  Progress is tracked in [issue #2](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
 
 For less common global settings, `advanced_server_settings` accepts a JSON
 object with current upstream names and JSON value types, for example:
@@ -228,7 +226,7 @@ can be started manually from GitHub Actions. It:
 3. Builds native AMD64 and ARM64 candidates from the exact same prepared source.
 4. Runs the HA linter, unit tests, browser/iframe/API/authentication tests and
    actual library persistence tests for both private and USB storage, plus runtime
-   WebUI downloads and opt-in native CEF initialization.
+   WebUI downloads. CEF is kept disabled and cannot be enabled through overrides.
 5. Promotes both passing images, commits the tested metadata update, and creates
    a versioned GitHub release. A failed architecture blocks publication and the
    app-store version change.

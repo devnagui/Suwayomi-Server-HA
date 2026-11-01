@@ -4,8 +4,6 @@ import json
 import math
 import os
 import re
-import secrets
-import select
 import signal
 import shutil
 import subprocess
@@ -19,7 +17,6 @@ from typing import Any
 
 
 OPTION_SETTINGS = {
-    "embedded_browser_enabled": "kcefEnabled",
     "downloads_path": "downloadsPath",
     "backup_path": "backupPath",
     "local_source_path": "localSourcePath",
@@ -48,10 +45,10 @@ FIXED_SETTINGS = {
     "webUISubpath": "",
     "initialOpenInBrowserEnabled": False,
     "systemTrayEnabled": False,
+    "kcefEnabled": False,
     "authMode": "BASIC_AUTH",
 }
 WEBUI_DEFAULTS = {"webui_channel": "bundled", "webui_update_check_interval": 23}
-OPTION_DEFAULTS = WEBUI_DEFAULTS | {"embedded_browser_enabled": False}
 EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path", "ssl", "certfile", "keyfile"} | set(WEBUI_DEFAULTS)
 RESERVED_SETTINGS = set(OPTION_SETTINGS.values()) | set(FIXED_SETTINGS) | {
     "rootDir", "authUsername", "authPassword", "basicAuthEnabled", "basicAuthUsername", "basicAuthPassword"
@@ -97,7 +94,7 @@ def storage_paths(options: dict[str, Any]) -> dict[str, str]:
 
 
 def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, Any]:
-    options = OPTION_DEFAULTS | options
+    options = WEBUI_DEFAULTS | options
     expected = set(OPTION_SETTINGS) | EXTRA_OPTIONS
     if set(options) != expected:
         raise ValueError("HA options do not match this app version; check the Configuration tab")
@@ -107,7 +104,7 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
         raise ValueError("auth_username must contain 1-64 letters, digits, dots, underscores or hyphens")
     if not isinstance(password, str) or not 12 <= len(password) <= 256 or any(ord(c) < 32 or ord(c) == 127 for c in password):
         raise ValueError("Set auth_password to 12-256 characters without control characters before starting")
-    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl", "embedded_browser_enabled"):
+    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl"):
         if type(options[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
     for key, minimum, maximum in (
@@ -246,49 +243,9 @@ def java_arguments(settings: dict[str, Any], heap: int) -> str:
     return "\n".join('"' + argument.replace("\\", "\\\\").replace('"', '\\"') + '"' for argument in arguments) + "\n"
 
 
-def java_command() -> list[str]:
-    return ["java", "@/run/suwayomi/java.args"]
-
-
 def terminate_child(child: subprocess.Popen) -> None:
     if child.poll() is None:
-        try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-
-
-def start_virtual_display(runtime: Path) -> subprocess.Popen:
-    authority = runtime / "display" / "Xauthority"
-    authority.parent.mkdir(mode=0o700, exist_ok=True)
-    os.chown(authority.parent, 1001, 1001)
-    private_file(authority, "", uid=1001, gid=1001)
-    subprocess.run(
-        ["xauth", "-f", str(authority)],
-        input=f"add :99 . {secrets.token_hex(16)}\n",
-        text=True, check=True, user=1001, group=1001,
-    )
-    display = subprocess.Popen(
-        ["Xvfb", ":99", "-displayfd", "1", "-screen", "0", "1280x720x24",
-         "-nolisten", "tcp", "-auth", str(authority)],
-        stdout=subprocess.PIPE, text=True, user=1001, group=1001, start_new_session=True,
-    )
-    output = display.stdout
-    try:
-        if output is None or not select.select([output], [], [], 10)[0] or output.readline().strip() != "99":
-            raise RuntimeError("Embedded browser virtual display did not become ready")
-        return display
-    except (OSError, RuntimeError):
-        terminate_child(display)
-        try:
-            display.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(display.pid, signal.SIGKILL)
-            display.wait()
-        raise
-    finally:
-        if output is not None:
-            output.close()
+        child.terminate()
 
 
 def prepare_webui(target: Path, packaged: Path = Path("/app/webui")) -> None:
@@ -420,7 +377,7 @@ def wait_ready(java: subprocess.Popen, authorization: str) -> None:
 
 def main() -> None:
     os.umask(0o077)
-    options = OPTION_DEFAULTS | json.loads(Path("/data/options.json").read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    options = WEBUI_DEFAULTS | json.loads(Path("/data/options.json").read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     metadata = json.loads(Path("/app/build-info.json").read_text(encoding="utf-8"))
     settings = build_settings(options, set(metadata["server_settings"]))
     tls = certificate_paths(options)
@@ -450,31 +407,24 @@ def main() -> None:
         flush=True,
     )
     children: list[subprocess.Popen] = []
-    display = None
     stopping = False
 
     def stop(_signum: int, _frame: Any) -> None:
         nonlocal stopping
         stopping = True
         for child in children:
-            if child is not display:
-                terminate_child(child)
+            terminate_child(child)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        environment = os.environ.copy()
-        if options["embedded_browser_enabled"]:
-            display = start_virtual_display(runtime)
-            children.append(display)
-            environment.update(DISPLAY=":99", XAUTHORITY=str(runtime / "display" / "Xauthority"))
-        java = subprocess.Popen(java_command(), env=environment, user=1001, group=1001, start_new_session=True)
+        java = subprocess.Popen(["java", "@" + str(runtime / "java.args")], user=1001, group=1001)
         children.append(java)
         authorization = base64.b64encode(f'{options["auth_username"]}:{options["auth_password"]}'.encode("utf-8")).decode("ascii")
         wait_ready(java, authorization)
         if stopping:
             return
-        proxy = subprocess.Popen(["nginx", "-c", str(runtime / "nginx.conf"), "-g", "daemon off;"], start_new_session=True)
+        proxy = subprocess.Popen(["nginx", "-c", str(runtime / "nginx.conf"), "-g", "daemon off;"])
         children.append(proxy)
         tls_fingerprint = certificate_fingerprint(tls) if tls is not None else None
         tls_check_at = time.monotonic() + 60
@@ -511,10 +461,7 @@ def main() -> None:
                 child.wait(timeout=45)
             except subprocess.TimeoutExpired:
                 print("WARNING: Process exceeded its shutdown deadline; terminating it.", file=sys.stderr, flush=True)
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                child.kill()
                 child.wait()
 
 
