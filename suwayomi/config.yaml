@@ -14,7 +14,6 @@ timeout: 120
 ingress: true
 ingress_port: 8080
 ingress_stream: true
-panel_admin: true
 panel_icon: "mdi:book-open-page-variant"
 panel_title: "Suwayomi"
 ports:

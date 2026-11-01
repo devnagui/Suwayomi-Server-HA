@@ -43,7 +43,7 @@ class SuwayomiTests(unittest.TestCase):
         settings = runner.build_settings(options(), SUPPORTED)
         self.assertEqual(settings["authMode"], "UI_LOGIN")
         self.assertEqual(settings["jwtTokenExpiry"], "5m")
-        self.assertTrue(MANIFEST["panel_admin"])
+        self.assertIs(MANIFEST.get("panel_admin", True), True)
         for key in ("authMode", "jwtTokenExpiry", "authUsername", "authPassword", "kcefEnabled"):
             configured = options()
             configured["advanced_server_settings"] = json.dumps({key: "unsafe"})
