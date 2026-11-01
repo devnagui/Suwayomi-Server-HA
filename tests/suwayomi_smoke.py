@@ -262,7 +262,8 @@ def main() -> None:
                 persisted = json.load(response)
                 assert persisted == {"data": {"category": category}}, (
                     "Library database did not persist in the selected storage root: "
-                    f"data={persisted.get('data')}, errors={len(persisted.get('errors', []))}"
+                    f"data={persisted.get('data')}, "
+                    f"errors={[(error.get('message', '').splitlines() or [''])[0].replace(options['auth_password'], '<redacted>').replace(authorization, '<redacted>') for error in persisted.get('errors', [])]}"
                 )
             logs = docker("logs", app)
             if arguments.webui_channel == "bundled":
