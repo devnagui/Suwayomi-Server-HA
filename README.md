@@ -18,12 +18,15 @@ the optional authenticated server API.
 - AMD64 and ARM64/aarch64 images, including Raspberry Pi 4/5.
 - Configurable storage root: keep database, library, downloads, backups and
   local manga in an app-specific folder on an existing mounted USB disk.
-- Reuse an existing FlareSolverr service; no second solver or Chromium is started.
+- Reuse an existing FlareSolverr service. An embedded browser for WebView sources
+  is optional and disabled by default; no second solver is started.
 - Optional direct access, disabled and unmapped by default, with mandatory
   authentication. Enable HTTPS with the existing HA certificates before
   Internet forwarding, or use a trusted HTTPS reverse proxy.
-- Versioned images built from a pinned upstream server commit and its matching
-  bundled WebUI, with daily upstream checks and automated tests before publication.
+- Versioned images built from a pinned server commit and separately SHA-256-pinned,
+  compatible WebUI, with server/UI update checks and tests before publication.
+- Optional compatible stable/preview WebUI downloads at runtime, without waiting
+  for a server image update; the tested bundled mode remains the default.
 
 ## Install in Home Assistant
 
@@ -52,14 +55,23 @@ commit alone means the images are available.
 
 ## Updating and contributing
 
-The GitHub pipeline checks upstream master daily at **04:15 UTC**. When it
-changes, the pipeline increments the HA patch version, builds and tests both
+The GitHub pipeline checks upstream master and compatible WebUI releases on
+pushes and daily at **04:15 UTC**. When either changes, the pipeline increments
+the HA patch version, builds and tests both
 architectures, then publishes both images and records the tested source/version
 update. Failed candidates are not offered as a new HA version. Released image
 versions are not silently overwritten.
 
 You can also use **Actions → Build and publish Suwayomi HA repackaging → Run
 workflow**. Keep `update_upstream` enabled to check the latest upstream source.
+Runtime downloads can be enabled in HA Configuration with
+`webui_channel: preview` (or `stable`) and
+`webui_update_check_interval: 23`. The upstream server selects a compatible UI.
+Use `embedded_browser_enabled: true` only for sources that need CEF; it runs on
+the backend, so a disabled-CEF error can also appear in Android clients.
+CEF uses extra RAM beyond Java heap and downloads its native components on first
+initialization, so leave it off when unnecessary on a 4 GiB Raspberry Pi.
+
 No personal token, local compiler or running controller is needed by the
 scheduled workflow: it uses GitHub's scoped workflow token.
 
@@ -80,11 +92,11 @@ For a manual source update on a development machine,
 clone the upstream server beside this repository, or pass its checkout path:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.4
+node .\scripts\update-suwayomi.cjs 0.1.5
 ```
 
 The command fast-forwards a clean upstream checkout and updates the source pin
-and app version together. Changes to the manga server itself belong in
+and the compatible WebUI/digest and app version together. Changes to the manga server itself belong in
 [Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server); packaging,
 ingress and Home Assistant configuration changes belong here.
 
@@ -100,7 +112,9 @@ same [MPL-2.0 license](LICENSE).
 
 The initial server source pin is
 [`6b481e8b62938b9c060eb210b934e0fbfdfa466b`](https://github.com/Suwayomi/Suwayomi-Server/tree/6b481e8b62938b9c060eb210b934e0fbfdfa466b)
-(server `v2.4.2435`, from upstream master/preview), with WebUI `r3518`.
+(server `v2.4.2435`, from upstream master/preview). Package 0.1.4 selects WebUI
+`r3569` independently through a packaging-only Gradle download override; upstream
+server source and its compatibility floor remain unchanged.
 Exact source and UI provenance are recorded in each image's
 `/app/build-info.json`. This package does not bundle or endorse third-party
 extension stores or grant rights to manga content.

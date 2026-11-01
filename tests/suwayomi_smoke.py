@@ -2,6 +2,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import secrets
 import socket
 import ssl
@@ -77,6 +78,8 @@ def main() -> None:
     parser.add_argument("--browser", action="store_true")
     parser.add_argument("--usb-storage", action="store_true")
     parser.add_argument("--tls", action="store_true")
+    parser.add_argument("--webui-channel", choices=("bundled", "stable", "preview"), default="bundled")
+    parser.add_argument("--embedded-browser", action="store_true")
     parser.add_argument("--browser-seconds", type=int, default=0)
     arguments = parser.parse_args()
     if arguments.tls and arguments.browser:
@@ -106,6 +109,9 @@ def main() -> None:
             flaresolverr_enabled=True,
             flaresolverr_url="http://172.30.32.2:8191",
             ssl=arguments.tls,
+            webui_channel=arguments.webui_channel,
+            embedded_browser_enabled=arguments.embedded_browser,
+            debug_logs_enabled=arguments.embedded_browser,
         )
         tls_directory = data / "ssl"
         tls_mounts = []
@@ -151,6 +157,18 @@ def main() -> None:
             scheme = "https" if arguments.tls else "http"
             direct_url = scheme + "://127.0.0.1:" + direct_port
             wait_for_app(app, direct_url + "/", 200, authorization)
+            if arguments.embedded_browser:
+                deadline = time.monotonic() + 300
+                while time.monotonic() < deadline:
+                    cef_logs = docker("logs", app)
+                    if "CEF: Initialization state INITIALIZED" in cef_logs:
+                        break
+                    if "Failed to set up CEF" in cef_logs or "Platform not supported by CEF" in cef_logs:
+                        raise RuntimeError("The opt-in embedded browser failed to initialize")
+                    time.sleep(1)
+                else:
+                    raise RuntimeError("Embedded browser did not initialize within 300 seconds")
+                print("PASS: opt-in native embedded browser initialized under its virtual display", flush=True)
             assert request(direct_url + "/")[0] == 401, "Direct access must require authentication"
             assert request(direct_url + "/api/graphql", ingress=PREFIX)[0] == 401, "Ingress headers bypassed direct authentication"
             assert request(direct_url + "/", base64.b64encode(b"wrong:wrong").decode())[0] == 401
@@ -162,20 +180,28 @@ def main() -> None:
             metadata = json.loads(docker("exec", app, "cat", "/app/build-info.json"))
             query = urllib.request.Request(
                 direct_url + "/api/graphql",
-                data=json.dumps({"query": "{ aboutServer { version } aboutWebUI { tag } settings { flareSolverrEnabled flareSolverrUrl kcefEnabled webUIFlavor } }"}).encode(),
+                data=json.dumps({"query": "{ aboutServer { version } aboutWebUI { tag channel } webUIUpdateStatus: getWebUIUpdateStatus { state } settings { flareSolverrEnabled flareSolverrUrl kcefEnabled webUIFlavor webUIChannel webUIUpdateCheckInterval } }"}).encode(),
                 headers={"Authorization": "Basic " + authorization, "Content-Type": "application/json"},
             )
             with urllib.request.urlopen(query, timeout=20) as response:
                 configured = json.load(response)
-            assert configured == {"data": {
-                "aboutServer": {"version": metadata["server_version"]},
-                "aboutWebUI": {"tag": metadata["webui_revision"]},
-                "settings": {
-                    "flareSolverrEnabled": True, "flareSolverrUrl": options["flaresolverr_url"],
-                    "kcefEnabled": False, "webUIFlavor": "CUSTOM",
-                },
-            }}, "Actual server, bundled UI or external FlareSolverr settings differ from the packaged contract"
-            print(f'PASS: updated backend {metadata["server_version"]}, packaged WebUI {metadata["webui_revision"]} and existing-service FlareSolverr configuration', flush=True)
+            assert "errors" not in configured, "Runtime WebUI/server configuration query failed"
+            active = configured["data"]
+            assert active["aboutServer"] == {"version": metadata["server_version"]}
+            assert active["settings"] == {
+                "flareSolverrEnabled": True, "flareSolverrUrl": options["flaresolverr_url"],
+                "kcefEnabled": arguments.embedded_browser,
+                "webUIFlavor": "CUSTOM" if arguments.webui_channel == "bundled" else "WEBUI",
+                "webUIChannel": arguments.webui_channel.upper(),
+                "webUIUpdateCheckInterval": 0.0 if arguments.webui_channel == "bundled" else 23.0,
+            }, "Active server settings differ from the selected WebUI mode"
+            assert active["aboutWebUI"]["channel"] == arguments.webui_channel.upper()
+            if arguments.webui_channel == "bundled":
+                assert active["aboutWebUI"]["tag"] == metadata["webui_revision"]
+            else:
+                assert re.fullmatch(r"r\d+", active["aboutWebUI"]["tag"]), "Runtime WebUI did not report a valid revision"
+                assert active["webUIUpdateStatus"]["state"] == "FINISHED", "Runtime UI download did not finish successfully"
+            print(f'PASS: backend {metadata["server_version"]}, active {arguments.webui_channel} WebUI {active["aboutWebUI"]["tag"]} and external FlareSolverr configuration', flush=True)
             if arguments.tls:
                 original = certificate_peer(int(direct_port), trusted)
                 expected = ssl.PEM_cert_to_DER_cert((tls_directory / "fullchain.pem").read_text())
@@ -235,7 +261,10 @@ def main() -> None:
             with urllib.request.urlopen(persistence_request, timeout=20) as response:
                 assert json.load(response) == {"data": {"category": category}}, "Library database did not persist in the selected storage root"
             logs = docker("logs", app)
-            assert "Downloading WebUI" not in logs and "Downloading WebUI zip" not in logs, "Packaged UI unexpectedly required an Internet download"
+            if arguments.webui_channel == "bundled":
+                assert "Downloading WebUI" not in logs and "Downloading WebUI zip" not in logs, "Packaged UI unexpectedly required an Internet download"
+            else:
+                assert "Downloading WebUI zip from the Internet" in logs, "Runtime mode did not exercise an actual UI download"
             print(docker("exec", client, "python3", "/tests/suwayomi_probe.py"), flush=True)
             print("PASS: authentication, trusted ingress, streamed API/WebSockets, disabled direct port and persistent state", flush=True)
             print(f"PASS: {'mounted USB' if arguments.usb_storage else 'private /data'} storage root, actual H2 library persistence, downloads/backups/local paths", flush=True)

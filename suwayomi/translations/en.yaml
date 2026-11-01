@@ -20,6 +20,15 @@ configuration:
   jvm_heap_mb:
     name: Maximum Java heap (MiB)
     description: Not a whole-app RAM cap. The 768 MiB default leaves headroom for HA and the shared FlareSolverr.
+  webui_channel:
+    name: WebUI update channel
+    description: Bundled keeps the tested image UI. Stable or preview enables upstream-compatible runtime downloads without replacing the server image; previous managed UI directories are retained on channel changes.
+  embedded_browser_enabled:
+    name: Enable embedded browser for manga sources
+    description: Opt-in CEF support for sources requiring WebViews. Downloads native browser components on first use and consumes additional RAM beyond the Java heap. Keep off unless needed, especially on a 4 GiB Pi.
+  webui_update_check_interval:
+    name: Runtime WebUI update interval (hours)
+    description: Automatic checks and downloads every 1-23 hours in stable/preview mode. Zero leaves updates manual. Bundled mode never downloads a UI.
   storage_path:
     name: Server storage root
     description: Stores the database, library, settings and extension data. Set an app folder under an existing mounted USB volume, for example /media/torrent_disk/suwayomi. Changing this does not migrate old data.
