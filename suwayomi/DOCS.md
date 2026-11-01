@@ -26,8 +26,9 @@ pullable from `ghcr.io/devnagui/suwayomi-server-ha` before installation. Check
 the [build/publish workflow](../.github/workflows/suwayomi.yml) for a successful
 run for both architectures. The HA host pulls an image; it does not compile
 Kotlin/Gradle or run a second FlareSolverr browser.
-Release 0.1.2 passed the native two-architecture pipeline and both image
-manifests were verified anonymously readable from GHCR.
+Release 0.1.4 passed the native two-architecture pipeline. Both images were
+fully pulled anonymously and verified to contain server v2.4.2435, WebUI r3569
+and the expected WebUI SHA-256. CEF remains disabled pending issue #2.
 
 ## Configurable storage, including USB
 

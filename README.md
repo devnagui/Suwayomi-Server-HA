@@ -43,9 +43,11 @@ For USB storage, set `storage_path` to your mounted app folder, for example
 `/media/torrent_disk/suwayomi`. Leave the individual path overrides empty to
 keep everything under that root.
 
-[Release 0.1.2](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.2)
+[Release 0.1.4](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.4)
 has passed the native AMD64/ARM64 pipeline. Both architecture images were
-verified publicly pullable from GHCR without registry credentials.
+fully pulled from GHCR without registry credentials, and their actual packaged
+server/UI versions and archive SHA-256 were verified. CEF is kept disabled
+pending [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
 
 Both architecture images for the app version must be published and publicly
 pullable from GHCR before Supervisor can install the package. The
