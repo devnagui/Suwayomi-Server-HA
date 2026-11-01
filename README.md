@@ -15,13 +15,16 @@ the optional authenticated server API.
 
 - Native, authenticated Home Assistant ingress with working assets, browser
   routing, GraphQL and WebSockets.
+- Native Suwayomi UI login/JWT for separate clients; HA administrators get an
+  automatic shared administrator session through a private token broker.
 - AMD64 and ARM64/aarch64 images, including Raspberry Pi 4/5.
 - Configurable storage root: keep database, library, downloads, backups and
   local manga in an app-specific folder on an existing mounted USB disk.
 - Reuse an existing FlareSolverr service; no second solver or embedded Chromium
   is started.
 - Optional direct access, disabled and unmapped by default, with mandatory
-  authentication. Enable HTTPS with the existing HA certificates before
+  native JWT protection for library/API/media (the login/static UI is public).
+  Enable HTTPS with the existing HA certificates before
   Internet forwarding, or use a trusted HTTPS reverse proxy.
 - Versioned images built from a pinned server commit and separately SHA-256-pinned,
   compatible WebUI, with server/UI update checks and tests before publication.
@@ -48,6 +51,12 @@ has passed the native AMD64/ARM64 pipeline. Both architecture images were
 fully pulled from GHCR without registry credentials, and their actual packaged
 server/UI versions and archive SHA-256 were verified. CEF is kept disabled
 pending [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
+
+The local **0.1.5 candidate is not published**. It migrates container-enforced
+Basic authentication to native `UI_LOGIN`, keeping the existing
+`auth_username`/`auth_password` as built-in administrator 1 and retaining its
+library and other users. See the [login migration guidance](suwayomi/DOCS.md#login-migration-from-014).
+No live HA configuration or credentials are changed by preparing this candidate.
 
 Both architecture images for the app version must be published and publicly
 pullable from GHCR before Supervisor can install the package. The
@@ -94,7 +103,7 @@ For a manual source update on a development machine,
 clone the upstream server beside this repository, or pass its checkout path:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.5
+node .\scripts\update-suwayomi.cjs 0.1.6
 ```
 
 The command fast-forwards a clean upstream checkout and updates the source pin
@@ -114,7 +123,7 @@ same [MPL-2.0 license](LICENSE).
 
 The initial server source pin is
 [`6b481e8b62938b9c060eb210b934e0fbfdfa466b`](https://github.com/Suwayomi/Suwayomi-Server/tree/6b481e8b62938b9c060eb210b934e0fbfdfa466b)
-(server `v2.4.2435`, from upstream master/preview). Package 0.1.4 selects WebUI
+(server `v2.4.2435`, from upstream master/preview). Packages 0.1.4/0.1.5 select WebUI
 `r3569` independently through a packaging-only Gradle download override; upstream
 server source and its compatibility floor remain unchanged.
 Exact source and UI provenance are recorded in each image's

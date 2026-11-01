@@ -2,3 +2,4 @@ DOCS.md
 CHANGELOG.md
 __pycache__
 *.pyc
+chapter-page-list.patch

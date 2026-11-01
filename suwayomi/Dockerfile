@@ -21,7 +21,7 @@ RUN python3 /build_source.py /source /output "$WEBUI_REF" "$WEBUI_SHA256"
 FROM eclipse-temurin:25-jre-noble
 ARG SOURCE_REF=6b481e8b62938b9c060eb210b934e0fbfdfa466b
 ARG WEBUI_REF=r3569
-ARG BUILD_VERSION=0.1.4
+ARG BUILD_VERSION=0.1.5
 ARG BUILD_ARCH=amd64
 LABEL org.opencontainers.image.source="https://github.com/devnagui/Suwayomi-Server-HA" \
     org.opencontainers.image.licenses="MPL-2.0" \
@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --uid 1001 --gid 1001 --create-home suwayomi \
     && mkdir -p /app /run/suwayomi
 COPY --from=builder /output/ /app/
-COPY run.py nginx.conf /app/
+COPY run.py ingress_auth.py nginx.conf /app/
 ENV HOME=/home/suwayomi
 WORKDIR /app
 EXPOSE 8080 4567

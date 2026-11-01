@@ -17,6 +17,8 @@ authenticated server API address, not a temporary HA ingress session URL.
    repositories, reload the store, and install **Suwayomi Server**.
 2. Set a unique `auth_password` of 12-256 characters and a simple
    `auth_username` containing letters, digits, dots, underscores or hyphens.
+   Passwords must not have leading/trailing whitespace: upstream trims the
+   built-in administrator bootstrap password.
 3. Set `storage_path` to the chosen storage folder and configure the internal
    URL of your existing FlareSolverr service.
 4. Save, start the app, enable its sidebar entry and open it through HA ingress.
@@ -103,6 +105,7 @@ It also exposes `webui_channel` and `webui_update_check_interval`.
 
 - `jvm_heap_mb` defaults to 768 MiB. This limits Java heap, not total app RAM;
   native/JVM overhead, HA and the shared solver need additional headroom.
+  Existing explicit values (including 512 MiB) are retained.
 - Source concurrency defaults to two for small ARM hosts.
 - `flaresolverr_url` is the service root, **without `/v1`**. The default
   `http://db21ed7f-flaresolverr:8191` suits the commonly used existing HA
@@ -158,21 +161,74 @@ settings in the server UI.
 ## Ingress and optional direct access
 
 Ingress uses HA's authentication. Internal port 8080 accepts only Supervisor
-(`172.30.32.2`) with a validated native `X-Ingress-Path`. The proxy changes only
-the HTML base tag; the upstream WebUI uses it for relative assets, lazy imports,
+(`172.30.32.2`) with a validated native `X-Ingress-Path`. The proxy changes
+the HTML base tag and loads an ingress-only authentication bootstrap script;
+the upstream WebUI uses the base for relative assets, lazy imports,
 router paths, API/WebSocket URLs, browser storage and service-worker scope.
 JSON, JavaScript, CSS and binary content are not rewritten. Streamed requests
 and WebSockets remain enabled.
 
-The default administrator-only HA panel is retained: HA administrators using
-the sidebar share the configured Suwayomi account. This is not HA-to-Suwayomi
-user synchronization. No Supervisor token, Docker socket, host networking,
-custom Ingress integration or public static token is required.
+The administrator-only HA panel is explicit. HA administrators using the
+sidebar share native Suwayomi administrator **ID 1**, without another password
+prompt. This is not HA-to-Suwayomi user synchronization.
+
+The backend uses `UI_LOGIN` in every WebUI mode, with five-minute access JWTs.
+Startup signs in through the upstream login mutation and verifies administrator
+1/ADMIN and `UI_LOGIN` before exposing either listener. Its refresh JWT stays in
+`/run/suwayomi/auth/ingress-session.json` (directory 0700, file/socket 0600);
+the Unix socket is not a public listener. The ingress-only broker uses native
+refresh and revalidates identity; it returns only short-lived access JWTs.
+The browser stores a scoped **non-secret marker**, not that shared refresh JWT.
+The bootstrap intercepts the shipped WebUI's native refresh operation only;
+normal API, WebSocket and media requests still require native authentication.
+Direct access cannot reach the bootstrap/broker, and a marker is not a valid
+direct refresh token. No Visitor is promoted, upstream auth is never disabled,
+and no Supervisor token, Docker socket or public static secret is used.
+
+Native HA forwarding preserves application Authorization headers; Supervisor's
+`panel_admin` check rejects non-admin ingress sessions before proxying. The
+local iframe simulator exercises that forwarding contract, not a live HA
+authentication session. Verify the real sidebar/login during a later approved
+deployment; this migration does not contact or reconfigure HA.
+
+Invalid/expired refresh, unavailable backend or wrong administrator identity
+returns an explicit, redacted authentication error (503) and latches the broker
+closed: no Basic or automatic-password-login fallback. After fixing the
+reported cause, restart the app to establish a new private session. Native
+refresh expiry may therefore require an app restart for long-running ingress.
+Runtime stable/preview UIs can change their auth contract; use the tested bundle
+if a later runtime UI cannot establish its native session.
 
 Direct access needs **both** `direct_access_enabled: true` and a host-port
 mapping for `4567/tcp` in the Network section. Both are off by default.
-Every direct route, API, download and WebSocket upgrade requires authentication;
-forging ingress headers grants no bypass. The backend is loopback-only on 4568.
+The login page and static WebUI are public when direct access is enabled.
+Library queries, mutations, downloads and media remain protected by native JWT,
+including native WebSocket connection/subscription authentication. Invalid
+tokens and old Basic headers grant no bypass. The backend is loopback-only on
+4568. Direct browsers use the native login form and their own native refresh
+session; API clients use login/refresh mutations and bearer tokens.
+
+### Login migration from 0.1.4
+
+0.1.5 is a **local, unpublished candidate**, not an instruction to change live HA.
+It is authentication-only: the pinned upstream server code is built without
+server overlays. The independent local chapter-page-list patch is preserved,
+but excluded from the Docker context, JAR and packaged provenance.
+Before a later approved upgrade, take a cold backup of `/data` and the external
+USB server tree. Keep the existing HA `auth_username` and `auth_password`:
+the pinned upstream migration/startup settings synchronize only built-in
+administrator 1's credentials, not the library or other accounts. No accounts,
+categories, manga, reading state or storage locations are deleted or reset.
+Existing secondary users keep their native credentials and roles.
+
+Use those same HA-configured credentials in the direct WebUI login form or
+native API login, not in an HTTP Basic challenge. If startup reports an
+administrator conflict, check for another account already using that username;
+upstream can rename administrator 1 on a collision, so startup refuses to
+advertise a wrongly authenticated session. Do not delete accounts or initialize
+a new storage root to work around it. Correct the conflict through an authorized
+native administrator session before retrying. Ingress remains shared-admin,
+not a way to turn a direct Visitor or ordinary user into an administrator.
 
 ### Reuse the actual HA certificates for direct HTTPS
 
@@ -228,6 +284,9 @@ can be started manually from GitHub Actions. It:
 4. Runs the HA linter, unit tests, browser/iframe/API/authentication tests and
    actual library persistence tests for both private and USB storage, plus runtime
    WebUI downloads. CEF is kept disabled and cannot be enabled through overrides.
+   Both native architecture jobs also explicitly gate 0.1.4→UI_LOGIN migration,
+   intentional authentication failure and stable WebUI login/ingress compatibility.
+   Subnet smoke checks run sequentially within each job before candidate upload.
 5. Promotes both passing images, commits the tested metadata update, and creates
    a versioned GitHub release. A failed architecture blocks publication and the
    app-store version change.
@@ -255,7 +314,7 @@ Clone upstream `Suwayomi-Server` beside `Suwayomi-Server-HA`, or pass a checkout
 path as the second argument:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.5
+node .\scripts\update-suwayomi.cjs 0.1.6
 ```
 
 The command rejects dirty checkouts and non-increasing app versions,
@@ -281,6 +340,7 @@ it changes the downloaded bundle, not the upstream server code or compatibility 
 python -m unittest discover -s tests -p test_suwayomi.py
 docker build -t suwayomi-ha:test .\suwayomi
 python .\tests\suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage
+python .\tests\suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage --migration-from ghcr.io/devnagui/suwayomi-server-ha/suwayomi-amd64:0.1.4 --auth-failure
 ```
 
 Browser tests require `npm --prefix tests ci` and
@@ -298,9 +358,20 @@ trust/hostname and rejection of plaintext, then exercises a real renewal reload.
 It does not disable certificate checks. Run `--browser` separately from `--tls`;
 the browser/iframe tests and the verified HTTPS client cover distinct contracts.
 
-Local browser tests cover six routes, 98 app-owned assets, ingress iframe
+Local browser tests cover six routes, roughly 100 app-owned assets, ingress iframe
 styles/icons, API/WebSocket requests, direct authentication, service-worker
 scope and restart persistence. Optional upstream Google Fonts can be blocked
 by the test environment and are reported separately. Controller-side ARM64
 emulation is not a physical Pi benchmark. Real HA login/sidebar, phone UI and
 third-party manga-source downloads require deployment-specific verification.
+
+Login checks exercise the real shipped UI in a separate HA-host iframe,
+automatic ingress JWT sessions, direct form login/wrong-password/logout/invalid
+refresh, real access-token expiry/recovery, route-reload refresh, protected
+native WebSocket subscriptions (including anonymous denial) and actual local CBZ
+thumbnail/page bytes. The migration flag seeds an existing 0.1.4 library and
+non-admin account, stops it gracefully, and verifies the same users/library
+after switching images. `--auth-failure` invalidates only the disposable fixture's
+JWT audience and checks repeated 503 denial, redacted logs and the frontend's
+visible authentication failure. All subnet smoke invocations must run
+**sequentially**. Runtime UI checks complement the bundled/default checks.

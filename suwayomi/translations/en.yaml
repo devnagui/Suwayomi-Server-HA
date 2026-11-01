@@ -1,10 +1,10 @@
 configuration:
   auth_username:
     name: Suwayomi username
-    description: The server account shared by HA administrators and authenticated direct clients.
+    description: Native built-in administrator 1 shared by HA administrators and direct UI/API login. Keep the existing value when migrating from Basic auth; other users and library state are retained.
   auth_password:
     name: Suwayomi password
-    description: Required before startup; use a unique password of 12-256 characters.
+    description: Native UI login password; keep existing credentials when migrating. Use 12-256 characters without leading/trailing whitespace. Ingress signs in automatically through a private JWT broker.
   direct_access_enabled:
     name: Enable direct API and WebUI access
     description: Also requires a Network port mapping. Keep off for ingress-only use; use HTTPS before Internet exposure.
@@ -80,4 +80,4 @@ configuration:
     name: Additional global server settings (JSON)
     description: Current upstream names and JSON types. Unknown, deprecated and app-managed keys are rejected. Per-user settings belong in Suwayomi.
 network:
-  4567/tcp: Optional authenticated HTTP API and WebUI; put behind HTTPS for Internet access.
+  4567/tcp: Optional native UI login/JWT API and media; static login UI is public. Use HTTPS for Internet access.
