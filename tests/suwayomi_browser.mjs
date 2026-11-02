@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
+import { trackAppAssets } from './browser_ready.mjs';
 
 const browser = await chromium.launch({ headless: true });
 const expectAuthFailure = process.argv.includes('--expect-ingress-auth-failure');
@@ -10,6 +11,7 @@ try {
             locale: 'en-US',
         });
         const page = await context.newPage();
+        const waitForAppReady = trackAppAssets(page, base);
         assert.equal(await page.evaluate(() => navigator.language), 'en-US');
         if (expectAuthFailure) {
             const messages = [];
@@ -53,6 +55,7 @@ try {
         }
         await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 30000 });
         await page.getByLabel(/^Username$/i).waitFor({ state: 'hidden' });
+        await waitForAppReady();
         const errors = [];
         const consoleErrors = [];
         const externalFonts = new Set();
@@ -120,6 +123,7 @@ try {
                 return { status: response.status, body: await response.json() };
             }, session.accessToken);
             assert.deepEqual(result, { status: 200, body: { data: { user: { id: 1 } } } });
+            await waitForAppReady();
         }
         assert.ok(assets.size >= 10, 'Too few real browser assets were exercised');
         assert.ok(nativeRefreshes.length >= 6, 'Native WebUI did not refresh its session on route reloads');
@@ -159,6 +163,7 @@ try {
         const anonymous = await subscribe(null);
         assert.ok(anonymous.type === 'error' || anonymous.payload?.errors, 'Anonymous WebSocket received protected subscription data');
         await page.goto(base.href, { waitUntil: 'networkidle' });
+        await waitForAppReady();
         const registration = await page.evaluate(async () => {
             const ready = await Promise.race([
                 navigator.serviceWorker.ready,
@@ -185,6 +190,7 @@ try {
                 return { fontFamily: computed.fontFamily, backgroundColor: computed.backgroundColor };
             });
             assert.ok(style.fontFamily && style.backgroundColor, 'Iframe styles did not load');
+            await host.waitForLoadState('networkidle');
             await host.close();
         }
         assert.deepEqual(errors, [], 'Browser, iframe or asset failures');

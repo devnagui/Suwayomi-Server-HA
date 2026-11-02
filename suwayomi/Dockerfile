@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM --platform=$BUILDPLATFORM eclipse-temurin:25-jdk-noble AS builder
 
-ARG SOURCE_REF=6b481e8b62938b9c060eb210b934e0fbfdfa466b
+ARG SOURCE_REF=7b061be09c9b62a89a63addd11ac91c40fc2510f
 ARG WEBUI_REF=r3569
 ARG WEBUI_SHA256=d20b8421f4137a5cf7fca24bd8c62e6c0ad72ea3a373d215e396d801ccac145b
 ARG WEBUI_MIN_SERVER=2366
@@ -12,16 +12,23 @@ RUN git clone https://github.com/Suwayomi/Suwayomi-Server.git . \
     && git checkout --detach "$SOURCE_REF" \
     && test "$(git rev-parse HEAD)" = "$SOURCE_REF"
 COPY build_source.py /build_source.py
+COPY bundled-webui-version.patch scoped-manga-cancellation.patch /source/
+RUN git apply --check bundled-webui-version.patch scoped-manga-cancellation.patch \
+    && git apply bundled-webui-version.patch scoped-manga-cancellation.patch
 RUN python3 /build_source.py --pin-webui /source "$WEBUI_REF" "$WEBUI_MIN_SERVER" "$WEBUI_SHA256"
 RUN --mount=type=cache,target=/root/.gradle \
     cp .github/runner-files/ci-gradle.properties /root/.gradle/gradle.properties \
-    && ./gradlew --no-daemon --max-workers=2 --init-script /source/ha-webui.gradle :server:downloadWebUI :server:shadowJar
+    && ./gradlew --no-daemon --max-workers=2 --init-script /source/ha-webui.gradle \
+       :server:test --tests suwayomi.tachidesk.manga.impl.update.UpdaterTest \
+       --tests suwayomi.tachidesk.graphql.UpdateMutationTest \
+       --tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest \
+       :server:downloadWebUI :server:shadowJar
 RUN python3 /build_source.py /source /output "$WEBUI_REF" "$WEBUI_SHA256"
 
 FROM eclipse-temurin:25-jre-noble
-ARG SOURCE_REF=6b481e8b62938b9c060eb210b934e0fbfdfa466b
+ARG SOURCE_REF=7b061be09c9b62a89a63addd11ac91c40fc2510f
 ARG WEBUI_REF=r3569
-ARG BUILD_VERSION=0.1.5
+ARG BUILD_VERSION=0.1.6
 ARG BUILD_ARCH=amd64
 LABEL org.opencontainers.image.source="https://github.com/devnagui/Suwayomi-Server-HA" \
     org.opencontainers.image.licenses="MPL-2.0" \

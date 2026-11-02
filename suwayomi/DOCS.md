@@ -210,9 +210,9 @@ session; API clients use login/refresh mutations and bearer tokens.
 
 ### Login migration from 0.1.4
 
-0.1.5 is a **local, unpublished candidate**, not an instruction to change live HA.
-It is authentication-only: the pinned upstream server code is built without
-server overlays. The independent local chapter-page-list patch is preserved,
+0.1.5 was published on November 1, 2026, after both native architecture gates
+passed. It was authentication-only, without server overlays.
+The independent local chapter-page-list patch is preserved,
 but excluded from the Docker context, JAR and packaged provenance.
 Before a later approved upgrade, take a cold backup of `/data` and the external
 USB server tree. Keep the existing HA `auth_username` and `auth_password`:
@@ -314,14 +314,16 @@ Clone upstream `Suwayomi-Server` beside `Suwayomi-Server-HA`, or pass a checkout
 path as the second argument:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.6
+node .\scripts\update-suwayomi.cjs 0.1.7
 ```
 
 The command rejects dirty checkouts and non-increasing app versions,
 fast-forwards the server, resolves its full commit SHA, and updates the source
 pins and HA app version together. The initial upstream pin is
 [`6b481e8b62938b9c060eb210b934e0fbfdfa466b`](https://github.com/Suwayomi/Suwayomi-Server/tree/6b481e8b62938b9c060eb210b934e0fbfdfa466b):
-server `v2.4.2435` from upstream master/preview, with WebUI `r3518`.
+server `v2.4.2435` from upstream master/preview. Releases 0.1.4/0.1.5 bundle
+WebUI `r3569`; the local, unpublished 0.1.6 candidate advances the server to
+`7b061be09c9b62a89a63addd11ac91c40fc2510f` (`v2.4.2476`) with that same UI.
 HA app version and upstream server version are separate identifiers.
 
 The separately pinned compatible WebUI is extracted at image build time and copied into
@@ -332,12 +334,64 @@ uses the upstream runtime updater. On a UI upgrade the previous managed
 directory is retained as `webUI.previous-*`; unknown pre-existing directories or
 links are preserved and reported as migration errors, not deleted.
 The packaging-only `SERVER-WEBUI-OVERRIDE.gradle` is included with build provenance;
-it changes the downloaded bundle, not the upstream server code or compatibility floor.
+it selects the downloaded bundle and, from 0.1.6, its separate `HA_WEBUI_TAG`.
+Upstream `WEBUI_TAG` remains unchanged because the server also uses it as a
+stable/preview compatibility floor. The explicit `bundled-webui-version.patch`
+makes only bundled-channel checks use the package's revision and recognizes
+the managed custom/bundled flavor; it does not change runtime channel selection,
+server upgrade checks, automatic download settings or the offline bundled startup.
+
+### Update notices
+
+HA app versions, upstream server versions and WebUI revisions are independent.
+The November 2, 2026 upstream preview server `v2.4.2476` is genuinely newer than
+the `v2.4.2435` in HA 0.1.5. Update the server through a tested HA app release,
+not the upstream JAR download button. Preview WebUI is still `r3569`; stable is
+`r3518`, with upstream minimum server revisions `r2366` and `r2320` respectively.
+Switching to stable deliberately selects an older, compatible UI.
+
+Before 0.1.6, custom/bundled mode can falsely report `r3518` as an available
+update even while serving `r3569`: the independent archive override did not
+update the version used by upstream's bundled check, and the custom flavor
+differed from its recorded default flavor. The candidate fixes both metadata
+contracts, rather than disabling notifications or raising the runtime UI floor.
+Stable/preview channels still use upstream's genuine compatible update checks.
+
+The November 2 scheduled run
+[`41444378033`](https://github.com/devnagui/Suwayomi-Server-HA/actions/runs/41444378033)
+prepared 0.1.6 but failed only the ARM64 stable-UI browser gate: test navigation
+aborted unfinished lazy JavaScript imports after native login. AMD64 passed;
+publication was correctly blocked. The regression fix tracks actual same-origin
+assets before navigating again; a stale SPA `networkidle` load state alone is
+insufficient. HTTP/asset/JavaScript failure assertions remain enabled.
+
+The official `icon.png` is a repository presentation asset, separate from the
+sidebar `panel_icon` and the WebUI favicon. HA receives it when it refreshes the
+app repository; no image rebuild or live controller change alone installs it.
+
+### Individual manga-update cancellation (0.1.6 candidate)
+
+The explicit `scoped-manga-cancellation.patch` adds optional
+`UpdateStopInput.mangaIds: [Int!]`. IDs cancel only matching pending/running
+jobs, reporting the existing `SKIPPED` terminal state and preserving unrelated
+queues and completed jobs. Omitted/null IDs retain the legacy global stop;
+`[]` and unknown IDs do nothing. Clients must not substitute stop-all if a
+server does not support the new field.
+
+Both named overlays and their SHA-256 digests are recorded in
+`/app/build-info.json`, with the exact patch sources in `/app/`.
+The image build runs `UpdaterTest`, `UpdateMutationTest` and
+`HABundledWebUIVersionTest` before packaging. The last test verifies that the
+packaged revision is not offered as an update while a real revision mismatch
+is still reported.
+The unrelated local `chapter-page-list.patch` is not copied, applied or included
+in provenance.
 
 ## Local verification and known limits
 
 ```powershell
 python -m unittest discover -s tests -p test_suwayomi.py
+node --test .\tests\browser_ready.test.mjs
 docker build -t suwayomi-ha:test .\suwayomi
 python .\tests\suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage
 python .\tests\suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage --migration-from ghcr.io/devnagui/suwayomi-server-ha/suwayomi-amd64:0.1.4 --auth-failure
@@ -364,6 +418,10 @@ scope and restart persistence. Optional upstream Google Fonts can be blocked
 by the test environment and are reported separately. Controller-side ARM64
 emulation is not a physical Pi benchmark. Real HA login/sidebar, phone UI and
 third-party manga-source downloads require deployment-specific verification.
+The standalone browser-readiness fixtures need no Docker or live server; they
+reproduce a slow post-login import and verify genuine HTTP/JavaScript failures
+remain visible. Bundled smoke tests additionally require the update check to
+report the actual packaged UI revision with no false update.
 
 Login checks exercise the real shipped UI in a separate HA-host iframe,
 automatic ingress JWT sessions, direct form login/wrong-password/logout/invalid

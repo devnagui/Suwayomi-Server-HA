@@ -9,6 +9,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+SERVER_PATCHES = ("bundled-webui-version.patch", "scoped-manga-cancellation.patch")
+
 
 def pin_webui(source: Path, revision: str, minimum_server: int, digest: str) -> None:
     if not re.fullmatch(r"r\d+", revision) or minimum_server < 1 or not re.fullmatch(r"[0-9a-f]{64}", digest):
@@ -36,6 +38,7 @@ def pin_webui(source: Path, revision: str, minimum_server: int, digest: str) -> 
         "gradle.projectsEvaluated {\n"
         "    def server = gradle.rootProject.findProject(':server')\n"
         "    if (server == null) return\n"
+        f"    server.extensions.getByName('buildConfig').buildConfigField('String', 'HA_WEBUI_TAG', '\"{revision}\"')\n"
         "    server.tasks.named('downloadWebUI') {\n"
         "        enabled = false\n"
         "    }\n"
@@ -88,12 +91,17 @@ def package(source: Path, output: Path, expected_webui: str | None = None, expec
         "webui_revision": revision,
         "webui_sha256": digest,
         "webui_build_override": "SERVER-WEBUI-OVERRIDE.gradle",
-        "server_patches": [],
+        "server_patches": list(SERVER_PATCHES),
+        "server_patch_sha256": {
+            name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in SERVER_PATCHES
+        },
         "server_settings": sorted(settings),
     }
     (output / "build-info.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(source / "LICENSE", output / "SERVER-LICENSE")
     shutil.copyfile(source / "ha-webui.gradle", output / "SERVER-WEBUI-OVERRIDE.gradle")
+    for name in SERVER_PATCHES:
+        shutil.copyfile(source / name, output / name)
 
 
 if __name__ == "__main__":

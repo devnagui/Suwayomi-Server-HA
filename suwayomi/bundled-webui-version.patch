@@ -1,0 +1,66 @@
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt b/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt
+index 05ba1650..8a0243d1 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt
+@@ -639,7 +639,7 @@ object WebInterfaceManager {
+     private suspend fun getLatestCompatibleVersion(flavor: WebUIFlavor): String {
+         if (serverConfig.webUIChannel.value == WebUIChannel.BUNDLED) {
+             logger.debug { "getLatestCompatibleVersion: Channel is \"${WebUIChannel.BUNDLED}\", do not check for update" }
+-            return BuildConfig.WEBUI_TAG
++            return BuildConfig.HA_WEBUI_TAG
+         }
+ 
+         val currentServerVersionNumber =
+@@ -842,7 +842,10 @@ object WebInterfaceManager {
+         raiseError: Boolean = false,
+     ): Pair<String, Boolean> =
+         try {
+-            val isServedWebUIForCurrentFlavor = flavor.uiName == getServedWebUIFlavor().uiName
++            val isPackagedWebUI =
++                flavor == WebUIFlavor.CUSTOM && serverConfig.webUIChannel.value == WebUIChannel.BUNDLED
++            val isServedWebUIForCurrentFlavor =
++                isPackagedWebUI || flavor.uiName == getServedWebUIFlavor().uiName
+             val latestCompatibleVersion = getLatestCompatibleVersion(flavor)
+             val isVersionUpdateAvailable = latestCompatibleVersion != currentVersion
+ 
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/graphql/HABundledWebUIVersionTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/graphql/HABundledWebUIVersionTest.kt
+new file mode 100644
+index 00000000..7213522b
+--- /dev/null
++++ b/server/src/test/kotlin/suwayomi/tachidesk/graphql/HABundledWebUIVersionTest.kt
+@@ -0,0 +1,35 @@
++package suwayomi.tachidesk.graphql
++
++import kotlinx.coroutines.runBlocking
++import suwayomi.tachidesk.graphql.types.WebUIChannel
++import suwayomi.tachidesk.graphql.types.WebUIFlavor
++import suwayomi.tachidesk.server.generated.BuildConfig
++import suwayomi.tachidesk.server.serverConfig
++import suwayomi.tachidesk.server.util.WebInterfaceManager
++import suwayomi.tachidesk.test.ApplicationTest
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class HABundledWebUIVersionTest : ApplicationTest() {
++    @Test
++    fun `custom bundled check reports packaged revision without hiding a mismatch`() =
++        runBlocking {
++            val originalChannel = serverConfig.webUIChannel.value
++            val originalFlavor = serverConfig.webUIFlavor.value
++            try {
++                serverConfig.webUIChannel.value = WebUIChannel.BUNDLED
++                serverConfig.webUIFlavor.value = WebUIFlavor.CUSTOM
++                assertEquals(
++                    BuildConfig.HA_WEBUI_TAG to false,
++                    WebInterfaceManager.isUpdateAvailable(WebUIFlavor.CUSTOM, BuildConfig.HA_WEBUI_TAG, raiseError = true),
++                )
++                assertEquals(
++                    BuildConfig.HA_WEBUI_TAG to true,
++                    WebInterfaceManager.isUpdateAvailable(WebUIFlavor.CUSTOM, "r0", raiseError = true),
++                )
++            } finally {
++                serverConfig.webUIChannel.value = originalChannel
++                serverConfig.webUIFlavor.value = originalFlavor
++            }
++        }
++}
