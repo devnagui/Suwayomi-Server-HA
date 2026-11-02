@@ -298,6 +298,16 @@ def main() -> None:
             assert active["aboutWebUI"]["channel"] == arguments.webui_channel.upper()
             if arguments.webui_channel == "bundled":
                 assert active["aboutWebUI"]["tag"] == metadata["webui_revision"]
+                update_query = urllib.request.Request(
+                    direct_url + "/api/graphql",
+                    data=b'{"query":"{ checkForWebUIUpdate { tag updateAvailable } }"}',
+                    headers={"Authorization": "Bearer " + authorization, "Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(update_query, timeout=20) as response:
+                    update = json.load(response)
+                assert update == {"data": {"checkForWebUIUpdate": {
+                    "tag": metadata["webui_revision"], "updateAvailable": False,
+                }}}, "Bundled WebUI advertised a mismatched version or a false update"
             else:
                 assert re.fullmatch(r"r\d+", active["aboutWebUI"]["tag"]), "Runtime WebUI did not report a valid revision"
                 assert active["webUIUpdateStatus"]["state"] == "FINISHED", "Runtime UI download did not finish successfully"

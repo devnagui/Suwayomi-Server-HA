@@ -1,0 +1,392 @@
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/graphql/mutations/UpdateMutation.kt b/server/src/main/kotlin/suwayomi/tachidesk/graphql/mutations/UpdateMutation.kt
+index 2a34e739..c4cb1b09 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/graphql/mutations/UpdateMutation.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/graphql/mutations/UpdateMutation.kt
+@@ -2,6 +2,7 @@
+ 
+ package suwayomi.tachidesk.graphql.mutations
+ 
++import com.expediagroup.graphql.generator.annotations.GraphQLDescription
+ import com.expediagroup.graphql.generator.annotations.GraphQLIgnore
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.withTimeout
+@@ -125,6 +126,8 @@ class UpdateMutation {
+ 
+     data class UpdateStopInput(
+         val clientMutationId: String? = null,
++        @GraphQLDescription("Manga updates to cancel. Omit or pass null to stop all updates; an empty list does nothing.")
++        val mangaIds: List<Int>? = null,
+     )
+ 
+     data class UpdateStopPayload(
+@@ -133,7 +136,11 @@ class UpdateMutation {
+ 
+     @RequireAuth
+     fun updateStop(input: UpdateStopInput): UpdateStopPayload {
+-        updater.reset()
++        if (input.mangaIds == null) {
++            updater.reset()
++        } else {
++            updater.cancelMangas(input.mangaIds)
++        }
+         return UpdateStopPayload(input.clientMutationId)
+     }
+ }
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
+index 80e730a5..41f484f1 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/IUpdater.kt
+@@ -32,5 +32,7 @@ interface IUpdater {
+ 
+     fun reset()
+ 
++    fun cancelMangas(mangaIds: List<Int>)
++
+     fun getStatus(): UpdateUpdates
+ }
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/UpdateStatus.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/UpdateStatus.kt
+index 8dbe6942..393a79bb 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/UpdateStatus.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/UpdateStatus.kt
+@@ -23,7 +23,9 @@ data class UpdateStatus(
+                 .groupBy { it.status }
+                 .mapValues { entry ->
+                     entry.value.map { it.manga }
+-                }.plus(Pair(JobStatus.SKIPPED, skippedMangas)),
++                }.let { statuses ->
++                    statuses + (JobStatus.SKIPPED to (statuses[JobStatus.SKIPPED].orEmpty() + skippedMangas))
++                },
+         running = running,
+         numberOfJobs = jobs.size,
+     )
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
+index 7c6df928..d7d100d5 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/manga/impl/update/Updater.kt
+@@ -6,14 +6,17 @@ import eu.kanade.tachiyomi.source.model.UpdateStrategy
+ import io.github.oshai.kotlinlogging.KotlinLogging
+ import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.CoroutineStart
+ import kotlinx.coroutines.DelicateCoroutinesApi
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.FlowPreview
+ import kotlinx.coroutines.GlobalScope
++import kotlinx.coroutines.Job
+ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.cancelChildren
+ import kotlinx.coroutines.channels.BufferOverflow
+ import kotlinx.coroutines.channels.Channel
++import kotlinx.coroutines.coroutineScope
+ import kotlinx.coroutines.flow.MutableSharedFlow
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+@@ -92,6 +95,8 @@ class Updater : IUpdater {
+     private var updateStatusSkippedMangas: List<MangaDataClass> = emptyList()
+ 
+     private val tracker = ConcurrentHashMap<Int, UpdateJob>()
++    private val jobLock = Any()
++    private val activeJobs = mutableMapOf<Int, Job>()
+     private val updateChannels = ConcurrentHashMap<String, Channel<UpdateJob>>()
+ 
+     private var maxSourcesInParallel = 20 // max permits, necessary to be set to be able to release up to 20 permits
+@@ -235,7 +240,7 @@ class Updater : IUpdater {
+             categories,
+             mangas,
+             tracker.size,
+-            tracker.values.count { it.status == JobStatus.COMPLETE || it.status == JobStatus.FAILED },
++            tracker.values.count { it.status != JobStatus.PENDING && it.status != JobStatus.RUNNING },
+             this.updateStatusCategories[CategoryUpdateStatus.SKIPPED]?.size ?: 0,
+             this.updateStatusSkippedMangas.size,
+             if (addInitial == true) getStatus() else null,
+@@ -304,9 +309,7 @@ class Updater : IUpdater {
+         channel
+             .consumeAsFlow()
+             .onEach { job ->
+-                semaphore.withPermit {
+-                    process(job)
+-                }
++                process(job)
+             }.catch {
+                 logger.error(it) { "Error during updates (source: $source)" }
+                 handleChannelUpdateFailure(source)
+@@ -331,8 +334,29 @@ class Updater : IUpdater {
+     }
+ 
+     private suspend fun process(job: UpdateJob) {
+-        tracker[job.manga.id] = job.copy(status = JobStatus.RUNNING)
+-        updateStatus(mangaUpdates = listOf(tracker[job.manga.id]!!))
++        coroutineScope {
++            val task =
++                synchronized(jobLock) {
++                    if (tracker[job.manga.id] !== job) return@coroutineScope
++                    launch(start = CoroutineStart.LAZY) {
++                        semaphore.withPermit { processUpdate(job) }
++                    }.also { activeJobs[job.manga.id] = it }
++                }
++            try {
++                task.start()
++                task.join()
++            } finally {
++                synchronized(jobLock) {
++                    if (activeJobs[job.manga.id] === task) activeJobs.remove(job.manga.id)
++                }
++            }
++        }
++    }
++
++    private suspend fun processUpdate(job: UpdateJob) {
++        val runningJob = job.copy(status = JobStatus.RUNNING)
++        if (!synchronized(jobLock) { tracker.replace(job.manga.id, job, runningJob) }) return
++        updateStatus(mangaUpdates = listOf(runningJob))
+ 
+         // updateMangas is per-user. For automated global updates (job.userId == null), update the manga info if any
+         // user with this manga has it enabled. For user-triggered updates, the triggering user's setting applies.
+@@ -343,7 +367,7 @@ class Updater : IUpdater {
+                 anyUserWantsMangaUpdate(job.manga.id) || !job.manga.initialized
+             }
+ 
+-        tracker[job.manga.id] =
++        val result =
+             try {
+                 logger.info { "Updating ${job.manga}" }
+                 Manga.updateMangaAndChapters(
+@@ -357,11 +381,12 @@ class Updater : IUpdater {
+                 job.copy(status = JobStatus.FAILED)
+             }
+ 
++        if (!synchronized(jobLock) { tracker.replace(job.manga.id, runningJob, result) }) return
+         val wasLastJob = tracker.values.none { it.status == JobStatus.PENDING || it.status == JobStatus.RUNNING }
+ 
+         // in case this is the last update job, the running flag has to be true, before it gets set to false, to be able
+         // to properly clear the dataloader store in UpdateType
+-        updateStatus(immediate = wasLastJob, isRunning = true, mangaUpdates = listOf(tracker[job.manga.id]!!))
++        updateStatus(immediate = wasLastJob, isRunning = true, mangaUpdates = listOf(result))
+ 
+         if (wasLastJob) {
+             updateStatus(isRunning = false)
+@@ -481,24 +506,43 @@ class Updater : IUpdater {
+     ) {
+         // create all manga update jobs before adding them to the queue so that the client is able to calculate the
+         // progress properly right form the start
+-        mangas.forEach { tracker[it.id] = UpdateJob(it, userId = userId) }
+-        mangas.forEach { addMangaToQueue(it, userId) }
++        val jobs = mangas.map { UpdateJob(it, userId = userId) }
++        synchronized(jobLock) {
++            jobs.forEach { tracker[it.manga.id] = it }
++        }
++        jobs.groupBy { it.manga.sourceId }.forEach { (source, sourceJobs) ->
++            val updateChannel = getOrCreateUpdateChannelFor(source)
++            scope.launch {
++                sourceJobs.forEach { updateChannel.send(it) }
++            }
++        }
+     }
+ 
+-    private fun addMangaToQueue(
+-        manga: MangaDataClass,
+-        userId: Int?,
+-    ) {
+-        val updateChannel = getOrCreateUpdateChannelFor(manga.sourceId)
++    override fun cancelMangas(mangaIds: List<Int>) {
++        val cancelled =
++            synchronized(jobLock) {
++                mangaIds.distinct().mapNotNull { mangaId ->
++                    val job = tracker[mangaId] ?: return@mapNotNull null
++                    if (job.status != JobStatus.PENDING && job.status != JobStatus.RUNNING) return@mapNotNull null
++                    val skipped = job.copy(status = JobStatus.SKIPPED)
++                    tracker[mangaId] = skipped
++                    activeJobs[mangaId]?.cancel()
++                    skipped
++                }
++            }
++        if (cancelled.isEmpty()) return
+         scope.launch {
+-            updateChannel.send(UpdateJob(manga, userId = userId))
++            updateStatus(immediate = true, mangaUpdates = cancelled)
+         }
+     }
+ 
+     override fun reset() {
+         scope.coroutineContext.cancelChildren()
+ 
+-        tracker.clear()
++        synchronized(jobLock) {
++            activeJobs.clear()
++            tracker.clear()
++        }
+         this.mangaUpdates.clear()
+         this.categoryUpdates.clear()
+         this.updateStatusCategories = emptyMap()
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/graphql/UpdateMutationTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/graphql/UpdateMutationTest.kt
+index 59346dcb..57cf8faa 100644
+--- a/server/src/test/kotlin/suwayomi/tachidesk/graphql/UpdateMutationTest.kt
++++ b/server/src/test/kotlin/suwayomi/tachidesk/graphql/UpdateMutationTest.kt
+@@ -5,6 +5,21 @@ import kotlin.test.Test
+ import kotlin.test.assertEquals
+ 
+ class UpdateMutationTest : GraphQLTest() {
++    @Test
++    fun `update stop accepts scoped manga ids`() {
++        val response =
++            graphql(
++                """
++                mutation(${'$'}input: UpdateStopInput!) {
++                    updateStop(input: ${'$'}input) { clientMutationId }
++                }
++                """.trimIndent(),
++                mapOf("input" to mapOf("clientMutationId" to "scopedStop", "mangaIds" to listOf(42))),
++            )
++        response.assertNoErrors()
++        assertEquals("scopedStop", response.dataPath("updateStop", "clientMutationId"))
++    }
++
+     @Test
+     fun updateStop() {
+         val response =
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/TestUpdater.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/TestUpdater.kt
+index 26920e78..5c89c128 100644
+--- a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/TestUpdater.kt
++++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/TestUpdater.kt
+@@ -63,6 +63,10 @@ class TestUpdater : IUpdater {
+         TODO("Not yet implemented")
+     }
+ 
++    override fun cancelMangas(mangaIds: List<Int>) {
++        TODO("Not yet implemented")
++    }
++
+     override fun getStatus(): UpdateUpdates {
+         TODO("Not yet implemented")
+     }
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/UpdaterTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/UpdaterTest.kt
+index 9539fd3c..faa7a45a 100644
+--- a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/UpdaterTest.kt
++++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/UpdaterTest.kt
+@@ -1,8 +1,11 @@
+ package suwayomi.tachidesk.manga.impl.update
+ 
+ import io.mockk.coEvery
++import io.mockk.coVerify
+ import io.mockk.mockkObject
+ import io.mockk.unmockkObject
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.awaitCancellation
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.runBlocking
+ import kotlinx.coroutines.withTimeout
+@@ -30,6 +33,7 @@ import uy.kohesive.injekt.Injekt
+ import uy.kohesive.injekt.api.get
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
++import kotlin.test.assertFalse
+ import kotlin.test.assertTrue
+ 
+ class UpdaterTest : ApplicationTest() {
+@@ -69,6 +73,106 @@ class UpdaterTest : ApplicationTest() {
+         checkNotStartedFilter(automatedUpdate = true, namedCategory = false)
+     }
+ 
++    @Test
++    fun `cancelling running and queued manga preserves the source queue`() =
++        runBlocking {
++            val ids = (1..3).map { createLibraryManga("Cancellation $it") }
++            val mangas = CategoryManga.getCategoryMangaList(1, 0).filter { it.id in ids }.sortedBy { it.id }
++            val started = CompletableDeferred<Unit>()
++            val cancelled = CompletableDeferred<Unit>()
++            coEvery { Manga.updateMangaAndChapters(ids.first(), any(), any()) } coAnswers {
++                started.complete(Unit)
++                try {
++                    awaitCancellation()
++                } finally {
++                    cancelled.complete(Unit)
++                }
++            }
++            updater.addMangasToQueue(mangas, 1)
++            withTimeout(10_000) { started.await() }
++
++            updater.cancelMangas(listOf(ids[0], ids[1], ids[0], -1))
++
++            withTimeout(10_000) {
++                cancelled.await()
++                while (updater.getStatus().finishedJobs != 3) delay(10)
++            }
++            val status = updater.getStatus()
++            assertFalse(status.isRunning)
++            assertEquals(3, status.totalJobs)
++            assertEquals(
++                mapOf(ids[0] to JobStatus.SKIPPED, ids[1] to JobStatus.SKIPPED, ids[2] to JobStatus.COMPLETE),
++                status.mangaUpdates.associate { it.manga.id to it.status },
++            )
++            coVerify(exactly = 0) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
++            coVerify(exactly = 1) { Manga.updateMangaAndChapters(ids[2], any(), any()) }
++        }
++
++    @Test
++    fun `empty and unknown cancellation leaves other sources running`() =
++        runBlocking {
++            val ids = (1..2).map { createLibraryManga("Other source $it") }
++            val mangas = CategoryManga.getCategoryMangaList(1, 0).filter { it.id in ids }.sortedBy { it.id }
++            val started = ids.associateWith { CompletableDeferred<Unit>() }
++            val release = CompletableDeferred<Unit>()
++            coEvery { Manga.updateMangaAndChapters(any(), any(), any()) } coAnswers {
++                started.getValue(firstArg()).complete(Unit)
++                release.await()
++            }
++            updater.addMangasToQueue(mangas.mapIndexed { index, manga -> manga.copy(sourceId = "source-$index") }, 1)
++            withTimeout(10_000) { started.values.forEach { it.await() } }
++
++            updater.cancelMangas(emptyList())
++            updater.cancelMangas(listOf(-1))
++            assertTrue(updater.getStatus().mangaUpdates.all { it.status == JobStatus.RUNNING })
++            updater.cancelMangas(listOf(ids[0]))
++            assertEquals(JobStatus.RUNNING, statusFor(ids[1]))
++            assertTrue(updater.getStatus().isRunning)
++            release.complete(Unit)
++            withTimeout(10_000) {
++                while (updater.getStatus().finishedJobs != 2) delay(10)
++            }
++            updater.cancelMangas(listOf(ids[1]))
++            assertEquals(JobStatus.COMPLETE, statusFor(ids[1]))
++        }
++
++    @Test
++    fun `cancelling only a queued manga leaves its running source job intact and allows requeue`() =
++        runBlocking {
++            val ids = (1..2).map { createLibraryManga("Pending cancellation $it") }
++            val mangas = CategoryManga.getCategoryMangaList(1, 0).filter { it.id in ids }.sortedBy { it.id }
++            val started = CompletableDeferred<Unit>()
++            val release = CompletableDeferred<Unit>()
++            coEvery { Manga.updateMangaAndChapters(ids[0], any(), any()) } coAnswers {
++                started.complete(Unit)
++                release.await()
++            }
++            updater.addMangasToQueue(mangas, 1)
++            withTimeout(10_000) { started.await() }
++
++            updater.cancelMangas(listOf(ids[1]))
++            assertEquals(JobStatus.RUNNING, statusFor(ids[0]))
++            assertTrue(updater.getStatus().isRunning)
++            release.complete(Unit)
++            withTimeout(10_000) {
++                while (updater.getStatus().finishedJobs != 2) delay(10)
++            }
++            coVerify(exactly = 0) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
++
++            updater.addMangasToQueue(listOf(mangas[1]), 1)
++            withTimeout(10_000) {
++                while (statusFor(ids[1]) != JobStatus.COMPLETE) delay(10)
++            }
++            coVerify(exactly = 1) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
++        }
++
++    private fun statusFor(mangaId: Int) =
++        updater
++            .getStatus()
++            .mangaUpdates
++            .single { it.manga.id == mangaId }
++            .status
++
+     private fun checkNotStartedFilter(
+         automatedUpdate: Boolean,
+         namedCategory: Boolean,

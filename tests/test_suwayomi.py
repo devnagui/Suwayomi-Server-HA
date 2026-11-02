@@ -2,6 +2,7 @@ import ast
 import base64
 import copy
 import importlib.util
+import hashlib
 import io
 import json
 import re
@@ -192,6 +193,15 @@ class SuwayomiTests(unittest.TestCase):
         for forbidden in ("docker_api", "full_access", "host_network", "privileged", "hassio_api", "homeassistant_api"):
             self.assertNotIn(forbidden, MANIFEST)
 
+    def test_ha_app_icon_is_the_unmodified_licensed_upstream_asset(self):
+        icon = (APP / "icon.png").read_bytes()
+        self.assertEqual(icon[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(int.from_bytes(icon[16:20], "big"), 128)
+        self.assertEqual(int.from_bytes(icon[20:24], "big"), 128)
+        self.assertEqual(hashlib.sha256(icon).hexdigest(),
+                         "01f60bf4ccd803028d4559606b0738a39ef6b9bbb452b31b7dafd18e28fac076")
+        self.assertIn("faviconlogo-128.png", (ROOT / "README.md").read_text(encoding="utf-8"))
+
     def test_source_pin_is_consistent(self):
         pins = yaml.safe_load((APP / "build.yaml").read_text())["args"]
         pin = pins["SOURCE_REF"]
@@ -199,6 +209,9 @@ class SuwayomiTests(unittest.TestCase):
         docker = (APP / "Dockerfile").read_text()
         self.assertEqual(re.findall(r"ARG SOURCE_REF=([0-9a-f]+)", docker), [pin, pin])
         self.assertIn(":server:downloadWebUI :server:shadowJar", docker)
+        self.assertIn(":server:test --tests suwayomi.tachidesk.manga.impl.update.UpdaterTest", docker)
+        self.assertIn("--tests suwayomi.tachidesk.graphql.UpdateMutationTest", docker)
+        self.assertIn("--tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest", docker)
         self.assertIn("git rev-parse HEAD", docker)
         self.assertIn(f"ARG BUILD_VERSION={MANIFEST['version']}", docker)
         self.assertEqual(re.findall(r"ARG WEBUI_REF=(r\d+)", docker), [pins["WEBUI_REF"]] * 2)
@@ -265,12 +278,18 @@ class SuwayomiTests(unittest.TestCase):
         for selector in ("--browser", "--usb-storage", "--webui-channel preview", "--tls"):
             self.assertTrue(any(selector in command for command in commands))
 
-    def test_auth_only_build_excludes_independent_server_overlay(self):
+    def test_build_applies_only_the_explicit_approved_overlays(self):
         docker = (APP / "Dockerfile").read_text()
         self.assertNotIn("chapter-page-list.patch", docker)
-        self.assertNotIn("git apply", docker)
+        self.assertIn("COPY bundled-webui-version.patch scoped-manga-cancellation.patch /source/", docker)
+        self.assertIn("git apply --check bundled-webui-version.patch scoped-manga-cancellation.patch", docker)
         self.assertNotIn("ChapterTest", docker)
         self.assertIn("chapter-page-list.patch", (APP / ".dockerignore").read_text().splitlines())
+        cancellation = (APP / "scoped-manga-cancellation.patch").read_text()
+        self.assertIn("val mangaIds: List<Int>? = null", cancellation)
+        self.assertIn("UpdaterTest.kt", cancellation)
+        self.assertIn("UpdateMutationTest.kt", cancellation)
+        self.assertNotIn("ChapterForDownload", cancellation)
 
     def test_daily_upstream_check_skips_unchanged_and_updates_changed_source(self):
         pins = yaml.safe_load((APP / "build.yaml").read_text())["args"]
@@ -652,7 +671,10 @@ class SuwayomiTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "newer"):
                     builder.pin_webui(root, "r3569", 2500, digest)
             self.assertEqual(constants.read_text(), original)
-            self.assertIn("enabled = false", (root / "ha-webui.gradle").read_text())
+            override = (root / "ha-webui.gradle").read_text()
+            self.assertIn("enabled = false", override)
+            self.assertIn("'HA_WEBUI_TAG', '\"r3569\"'", override)
+            self.assertNotIn("'WEBUI_TAG'", override)
             self.assertEqual((root / "server/src/main/resources/WebUI.zip").read_bytes(), payload)
 
     def test_packaged_ui_digest_revision_and_provenance_are_verified(self):
@@ -666,6 +688,8 @@ class SuwayomiTests(unittest.TestCase):
             jars.mkdir(parents=True)
             (source / "LICENSE").write_text("test-only license fixture")
             (source / "ha-webui.gradle").write_text("test-only override fixture")
+            for name in builder.SERVER_PATCHES:
+                shutil.copyfile(APP / name, source / name)
             (source / "chapter-page-list.patch").write_text("test-only patch fixture")
             ui = io.BytesIO()
             with zipfile.ZipFile(ui, "w") as archive:
@@ -686,7 +710,11 @@ class SuwayomiTests(unittest.TestCase):
             self.assertEqual(metadata["webui_revision"], "r3569")
             self.assertEqual(metadata["webui_sha256"], digest)
             self.assertTrue((root / "output/SERVER-WEBUI-OVERRIDE.gradle").is_file())
-            self.assertEqual(metadata["server_patches"], [])
+            self.assertEqual(metadata["server_patches"], list(builder.SERVER_PATCHES))
+            for name in builder.SERVER_PATCHES:
+                self.assertEqual((root / "output" / name).read_bytes(), (APP / name).read_bytes())
+                self.assertEqual(metadata["server_patch_sha256"][name],
+                                 hashlib.sha256((APP / name).read_bytes()).hexdigest())
             self.assertFalse((root / "output/chapter-page-list.patch").exists())
             self.assertEqual((source / "chapter-page-list.patch").read_text(), "test-only patch fixture")
 

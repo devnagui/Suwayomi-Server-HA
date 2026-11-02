@@ -1,6 +1,27 @@
 # Changelog
 
-## 0.1.5 (local candidate, not published)
+## 0.1.6 (local candidate, not published)
+
+- Repackage [upstream Suwayomi server 7b061be09c9b](https://github.com/Suwayomi/Suwayomi-Server/commit/7b061be09c9b62a89a63addd11ac91c40fc2510f)
+  (`v2.4.2476`) with unchanged SHA-256-pinned compatible WebUI r3569.
+- Add the unmodified licensed upstream 128px icon at HA's `suwayomi/icon.png`
+  path for the app store and installed Apps view.
+- Wait for real app-asset completion after SPA login/routes in browser tests;
+  do not mistake stale Playwright network-idle state for finished lazy imports,
+  and do not ignore asset aborts, HTTP errors or JavaScript failures.
+- Correct bundled-WebUI update metadata using a separate `HA_WEBUI_TAG` and
+  explicit custom/bundled recognition. Do not change upstream `WEBUI_TAG`,
+  stable/preview compatibility floors, real upgrade notices or offline startup.
+- Support `updateStop(input: {mangaIds: [...]})` for selected pending/running
+  manga only, without cancelling unrelated source queues. Omitted/null IDs
+  retain stop-all behavior; empty/unknown IDs are no-ops.
+- Apply only the explicit metadata and scoped-cancellation overlays; include
+  their sources and SHA-256 in packaged provenance. Gate the image build on
+  targeted updater/mutation cancellation tests. Keep the independent local
+  chapter-page-list patch excluded.
+- Publish only after amd64 and ARM64 build, ingress/API/browser and USB library-persistence tests pass.
+
+## 0.1.5
 
 - Replace container-enforced Basic authentication with native UI_LOGIN/JWT;
   reuse HA credentials for upstream built-in administrator 1 without resetting

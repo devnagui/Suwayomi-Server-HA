@@ -132,6 +132,8 @@ jobs:
           node-version: "22"
       - run: npm --prefix build/tests ci
       - run: npx --prefix build/tests playwright install --with-deps chromium
+      - name: Verify browser route-readiness regression
+        run: node --test build/tests/browser_ready.test.mjs
       - uses: docker/setup-buildx-action@v4
       - name: Build pinned upstream source and HA repackaging
         uses: docker/build-push-action@v7

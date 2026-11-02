@@ -46,17 +46,19 @@ For USB storage, set `storage_path` to your mounted app folder, for example
 `/media/torrent_disk/suwayomi`. Leave the individual path overrides empty to
 keep everything under that root.
 
-[Release 0.1.4](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.4)
-has passed the native AMD64/ARM64 pipeline. Both architecture images were
-fully pulled from GHCR without registry credentials, and their actual packaged
-server/UI versions and archive SHA-256 were verified. CEF is kept disabled
+[Release 0.1.5](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.5)
+passed the native AMD64/ARM64 pipeline and was published on November 1, 2026.
+CEF is kept disabled
 pending [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
 
-The local **0.1.5 candidate is not published**. It migrates container-enforced
-Basic authentication to native `UI_LOGIN`, keeping the existing
+Release 0.1.5 migrates container-enforced Basic authentication to native
+`UI_LOGIN`, keeping the existing
 `auth_username`/`auth_password` as built-in administrator 1 and retaining its
 library and other users. See the [login migration guidance](suwayomi/DOCS.md#login-migration-from-014).
-No live HA configuration or credentials are changed by preparing this candidate.
+The local **0.1.6 candidate is not published**. It packages server `v2.4.2476`,
+fixes bundled-WebUI version reporting and the browser release-gate race, adds
+the upstream HA app icon, and supports cancelling individual manga updates.
+No live HA configuration or credentials are changed by preparing it.
 
 Both architecture images for the app version must be published and publicly
 pullable from GHCR before Supervisor can install the package. The
@@ -83,6 +85,15 @@ embedded-browser support did not consistently pass restart/persistence checks
 and is not included in this release. A disabled-CEF error can appear in Android
 as well as WebUI; runtime WebUI updates do not enable CEF.
 
+Server updates shown inside Suwayomi refer to upstream server releases, not HA
+app releases; install the tested HA image instead of downloading/replacing its
+JAR. On November 2, 2026, `v2.4.2476` is a genuine upgrade from `v2.4.2435`;
+preview WebUI `r3569` is unchanged. Before 0.1.6, bundled mode can incorrectly
+offer the older upstream bundle `r3518`: its custom flavor and overridden archive
+did not match the upstream update-check metadata. The candidate corrects that
+metadata without hiding genuine server/runtime UI updates or changing stable
+WebUI compatibility floors. See [update details](suwayomi/DOCS.md#update-notices).
+
 No personal token, local compiler or running controller is needed by the
 scheduled workflow: it uses GitHub's scoped workflow token.
 
@@ -103,7 +114,7 @@ For a manual source update on a development machine,
 clone the upstream server beside this repository, or pass its checkout path:
 
 ```powershell
-node .\scripts\update-suwayomi.cjs 0.1.6
+node .\scripts\update-suwayomi.cjs 0.1.7
 ```
 
 The command fast-forwards a clean upstream checkout and updates the source pin
@@ -121,11 +132,21 @@ They are redistributed under the Mozilla Public License 2.0 with their notices
 and matching source links preserved. This repository's packaging code uses the
 same [MPL-2.0 license](LICENSE).
 
+The HA Apps/store image at `suwayomi/icon.png` is an unmodified copy of upstream
+[`faviconlogo-128.png`](https://github.com/Suwayomi/Suwayomi-Server/blob/6b481e8b62938b9c060eb210b934e0fbfdfa466b/server/src/main/resources/icon/faviconlogo-128.png)
+(128 × 128, MPL-2.0; copyright Suwayomi contributors).
+Its SHA-256 is `01f60bf4ccd803028d4559606b0738a39ef6b9bbb452b31b7dafd18e28fac076`.
+HA reads this repository asset, not the sidebar's separate `mdi:` panel icon.
+
 The initial server source pin is
 [`6b481e8b62938b9c060eb210b934e0fbfdfa466b`](https://github.com/Suwayomi/Suwayomi-Server/tree/6b481e8b62938b9c060eb210b934e0fbfdfa466b)
 (server `v2.4.2435`, from upstream master/preview). Packages 0.1.4/0.1.5 select WebUI
-`r3569` independently through a packaging-only Gradle download override; upstream
-server source and its compatibility floor remain unchanged.
+`r3569` independently through a packaging-only Gradle download override.
+Candidate 0.1.6 pins server
+[`7b061be09c9b62a89a63addd11ac91c40fc2510f`](https://github.com/Suwayomi/Suwayomi-Server/tree/7b061be09c9b62a89a63addd11ac91c40fc2510f)
+and applies only the explicit bundled-WebUI metadata and scoped manga-cancellation
+patches, retaining upstream compatibility floors.
 Exact source and UI provenance are recorded in each image's
-`/app/build-info.json`. This package does not bundle or endorse third-party
+`/app/build-info.json`, including patch filenames and SHA-256; matching patch
+sources are included in `/app/`. This package does not bundle or endorse third-party
 extension stores or grant rights to manga content.
