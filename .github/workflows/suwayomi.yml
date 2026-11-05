@@ -42,6 +42,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r tests/requirements-suwayomi.txt
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: "9.8.1"
+      - name: Execute generated Gradle override regression
+        env:
+          SUWAYOMI_TEST_GRADLE: gradle
+        run: python -m unittest discover -s tests -p test_suwayomi.py
       - name: Check upstream without committing untested metadata
         if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_upstream)
         env:

@@ -402,6 +402,11 @@ python .\tests\suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage
 python .\tests\suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage --migration-from ghcr.io/devnagui/suwayomi-server-ha/suwayomi-amd64:0.1.4 --auth-failure
 ```
 
+Set `SUWAYOMI_TEST_GRADLE` to an installed Gradle 9.8.1 executable to also
+execute the generated init script against offline root, subproject and
+`buildSrc` fixtures. CI runs this regression before the image builds; it checks
+repository routing, the bundled revision override and the disabled download.
+
 Browser tests require `npm --prefix tests ci` and
 `npx --prefix tests playwright install chromium`; on Linux install the browser
 system dependencies too. ARM64 builds add
