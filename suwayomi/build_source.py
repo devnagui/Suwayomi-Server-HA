@@ -35,6 +35,17 @@ def pin_webui(source: Path, revision: str, minimum_server: int, digest: str) -> 
     destination.write_bytes(archive)
     override = source / "ha-webui.gradle"
     override.write_text(
+        "gradle.beforeProject { project ->\n"
+        "    project.repositories.withType(org.gradle.api.artifacts.repositories.MavenArtifactRepository).configureEach { repository ->\n"
+        "        if (repository.url.toString() == 'https://github.com/Suwayomi/Suwayomi-Server/raw/android-jar/') {\n"
+        "            repository.url = project.uri('https://raw.githubusercontent.com/Suwayomi/Suwayomi-Server/android-jar/')\n"
+        "            repository.content { descriptor ->\n"
+        "                descriptor.includeModule('com.github.Suwayomi', 'android-jar')\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "\n"
         "gradle.projectsEvaluated {\n"
         "    def server = gradle.rootProject.findProject(':server')\n"
         "    if (server == null) return\n"

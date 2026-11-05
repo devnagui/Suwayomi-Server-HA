@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -675,7 +676,67 @@ class SuwayomiTests(unittest.TestCase):
             self.assertIn("enabled = false", override)
             self.assertIn("'HA_WEBUI_TAG', '\"r3569\"'", override)
             self.assertNotIn("'WEBUI_TAG'", override)
+            self.assertIn("gradle.beforeProject { project ->", override)
+            self.assertIn("repositories.withType(org.gradle.api.artifacts.repositories.MavenArtifactRepository).configureEach", override)
+            self.assertIn("if (repository.url.toString() == 'https://github.com/Suwayomi/Suwayomi-Server/raw/android-jar/')", override)
+            self.assertIn("repository.url = project.uri('https://raw.githubusercontent.com/Suwayomi/Suwayomi-Server/android-jar/')", override)
+            self.assertIn("includeModule('com.github.Suwayomi', 'android-jar')", override)
             self.assertEqual((root / "server/src/main/resources/WebUI.zip").read_bytes(), payload)
+
+    @unittest.skipUnless(os.environ.get("SUWAYOMI_TEST_GRADLE"), "Set SUWAYOMI_TEST_GRADLE to a Gradle executable")
+    def test_generated_override_executes_in_gradle_root_subproject_and_buildsrc(self):
+        spec = importlib.util.spec_from_file_location("package_builder", APP / "build_source.py")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            constants = root / "buildSrc/src/main/kotlin/Constants.kt"
+            constants.parent.mkdir(parents=True)
+            constants.write_text('val webUIRevisionTag = "r3518"\n')
+            payload = b"test-only webui archive"
+            with patch.object(builder.subprocess, "check_output", return_value="2435"), patch.object(
+                builder.urllib.request, "urlopen", return_value=io.BytesIO(payload)
+            ):
+                builder.pin_webui(root, "r3569", 2366, hashlib.sha256(payload).hexdigest())
+            (root / "settings.gradle").write_text("rootProject.name = 'override-test'\ninclude 'server'\n")
+            repository_checks = """
+repositories {
+    maven { url = uri('https://github.com/Suwayomi/Suwayomi-Server/raw/android-jar/') }
+    maven { url = uri('https://jitpack.io') }
+}
+assert repositories[0].url.toString() == 'https://raw.githubusercontent.com/Suwayomi/Suwayomi-Server/android-jar/'
+assert repositories[1].url.toString() == 'https://jitpack.io'
+"""
+            (root / "build.gradle").write_text(repository_checks)
+            (root / "buildSrc/build.gradle").write_text(repository_checks)
+            (root / "server/build.gradle").write_text(repository_checks + """
+class TestBuildConfig {
+    String tag
+    void buildConfigField(String type, String name, String value) {
+        assert type == 'String'
+        assert name == 'HA_WEBUI_TAG'
+        tag = value
+    }
+}
+extensions.add('buildConfig', new TestBuildConfig())
+tasks.register('downloadWebUI') {
+    doLast { throw new GradleException('WebUI download must be disabled') }
+}
+tasks.register('verifyOverride') {
+    doLast {
+        assert project.extensions.getByName('buildConfig').tag == '"r3569"'
+        assert !project.tasks.named('downloadWebUI').get().enabled
+    }
+}
+""")
+            result = subprocess.run(
+                [os.environ["SUWAYOMI_TEST_GRADLE"], "--offline", "--no-daemon", "--max-workers=2",
+                 "--console=plain", "--init-script", str(root / "ha-webui.gradle"),
+                 ":server:verifyOverride", ":server:downloadWebUI"],
+                cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn(":server:downloadWebUI SKIPPED", result.stdout)
 
     def test_packaged_ui_digest_revision_and_provenance_are_verified(self):
         spec = importlib.util.spec_from_file_location("package_builder", APP / "build_source.py")
