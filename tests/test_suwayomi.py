@@ -675,6 +675,11 @@ class SuwayomiTests(unittest.TestCase):
             self.assertIn("enabled = false", override)
             self.assertIn("'HA_WEBUI_TAG', '\"r3569\"'", override)
             self.assertNotIn("'WEBUI_TAG'", override)
+            self.assertIn("gradle.beforeProject { project ->", override)
+            self.assertIn("repositories.withType(org.gradle.api.artifacts.repositories.MavenArtifactRepository).configureEach", override)
+            self.assertIn("if (url.toString() == 'https://github.com/Suwayomi/Suwayomi-Server/raw/android-jar/')", override)
+            self.assertIn("url = project.uri('https://raw.githubusercontent.com/Suwayomi/Suwayomi-Server/android-jar/')", override)
+            self.assertIn("includeModule('com.github.Suwayomi', 'android-jar')", override)
             self.assertEqual((root / "server/src/main/resources/WebUI.zip").read_bytes(), payload)
 
     def test_packaged_ui_digest_revision_and_provenance_are_verified(self):

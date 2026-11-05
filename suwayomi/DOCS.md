@@ -335,6 +335,11 @@ directory is retained as `webUI.previous-*`; unknown pre-existing directories or
 links are preserved and reported as migration errors, not deleted.
 The packaging-only `SERVER-WEBUI-OVERRIDE.gradle` is included with build provenance;
 it selects the downloaded bundle and, from 0.1.6, its separate `HA_WEBUI_TAG`.
+It also routes the upstream Android JAR repository through
+`raw.githubusercontent.com`, restricted to `com.github.Suwayomi:android-jar`.
+Other dependencies, including Aliucord's AXML, continue to their existing
+repositories without querying GitHub's redirect endpoint, which can return
+HTTP 504 and prevent Gradle from trying JitPack.
 Upstream `WEBUI_TAG` remains unchanged because the server also uses it as a
 stable/preview compatibility floor. The explicit `bundled-webui-version.patch`
 makes only bundled-channel checks use the package's revision and recognizes
