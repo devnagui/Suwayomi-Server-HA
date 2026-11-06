@@ -2,8 +2,8 @@
 FROM --platform=$BUILDPLATFORM eclipse-temurin:25-jdk-noble AS builder
 
 ARG SOURCE_REF=7b061be09c9b62a89a63addd11ac91c40fc2510f
-ARG WEBUI_REF=r3569
-ARG WEBUI_SHA256=d20b8421f4137a5cf7fca24bd8c62e6c0ad72ea3a373d215e396d801ccac145b
+ARG WEBUI_REF=r3574
+ARG WEBUI_SHA256=ee15cdf429ff4dca4c24fc7a62873ff980163e92b98ecdf7eab1f40ba34d16db
 ARG WEBUI_MIN_SERVER=2366
 RUN apt-get update && apt-get install -y --no-install-recommends git python3 \
     && rm -rf /var/lib/apt/lists/*
@@ -27,8 +27,8 @@ RUN python3 /build_source.py /source /output "$WEBUI_REF" "$WEBUI_SHA256"
 
 FROM eclipse-temurin:25-jre-noble
 ARG SOURCE_REF=7b061be09c9b62a89a63addd11ac91c40fc2510f
-ARG WEBUI_REF=r3569
-ARG BUILD_VERSION=0.1.6
+ARG WEBUI_REF=r3574
+ARG BUILD_VERSION=0.1.7
 ARG BUILD_ARCH=amd64
 LABEL org.opencontainers.image.source="https://github.com/devnagui/Suwayomi-Server-HA" \
     org.opencontainers.image.licenses="MPL-2.0" \
