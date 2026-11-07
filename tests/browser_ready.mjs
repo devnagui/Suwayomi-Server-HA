@@ -1,5 +1,28 @@
 import { createHash } from 'node:crypto';
 
+function isReadOnlyQuery(source) {
+    if (typeof source !== 'string') return false;
+    const tokens = source.replace(/"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|#[^\r\n]*/g, ' ')
+        .match(/[{}]|[_A-Za-z][_0-9A-Za-z]*/g) || [];
+    let depth = 0;
+    let definition;
+    let query = false;
+    for (const token of tokens) {
+        if (token === '{') {
+            if (depth === 0 && !definition) query = true;
+            depth += 1;
+        } else if (token === '}') {
+            depth -= 1;
+            if (depth === 0) definition = undefined;
+        } else if (depth === 0 && !definition) {
+            if (token === 'mutation' || token === 'subscription') return false;
+            if (token === 'query') query = true;
+            definition = token;
+        }
+    }
+    return query && depth === 0;
+}
+
 export function trackQueryReplacements(page, base, documentId) {
     const requests = new WeakMap();
     const responses = [];
@@ -13,7 +36,7 @@ export function trackQueryReplacements(page, base, documentId) {
         } catch {
             return;
         }
-        if (typeof body.query !== 'string' || !/^\s*(?:query\b|\{)/.test(body.query)) return;
+        if (!isReadOnlyQuery(body.query)) return;
         const signature = createHash('sha256').update(JSON.stringify({
             query: body.query, variables: body.variables || {},
         })).digest('hex');

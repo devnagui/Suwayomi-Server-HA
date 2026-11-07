@@ -48,6 +48,21 @@ test('a cancelled duplicate query requires successful identical data in the same
     page.emit('request', nextDocument);
     page.emit('requestfailed', nextDocument);
     assert.equal(await satisfied(nextDocument), false, 'A previous document response must not satisfy a new document query');
+    const withFragment = query('fragment STATUS on DownloadStatus { state }\nquery GET_DOWNLOAD_STATUS { downloadStatus { ...STATUS } }');
+    page.emit('request', withFragment);
+    page.emit('requestfailed', withFragment);
+    assert.equal(await satisfied(withFragment), false);
+    const completedFragment = query('fragment STATUS on DownloadStatus { state }\nquery GET_DOWNLOAD_STATUS { downloadStatus { ...STATUS } }');
+    page.emit('request', completedFragment);
+    page.emit('response', {
+        request: () => completedFragment, status: () => 200,
+        json: async () => ({ data: { downloadStatus: { state: 'STOPPED' } } }),
+    });
+    assert.equal(await satisfied(withFragment), true, 'Fragments may precede a valid read-only query');
+    const fragmentMutation = query('fragment RESULT on Result { id }\nmutation CHANGE { change { ...RESULT } }');
+    page.emit('request', fragmentMutation);
+    page.emit('requestfailed', fragmentMutation);
+    assert.equal(await satisfied(fragmentMutation), false, 'Fragments must not hide mutations');
 });
 
 test('only navigation-cancelled same-origin GraphQL POSTs are classified as expected', async () => {
