@@ -26,6 +26,32 @@ function isReadOnlyQuery(source) {
 export function trackQueryReplacements(page, base, documentId) {
     const requests = new WeakMap();
     const responses = [];
+    const subscriptionData = new Set();
+    const statusQueries = {
+        GET_DOWNLOAD_STATUS: { field: 'downloadStatus', subscription: 'downloadStatusChanged' },
+        GET_WEBUI_UPDATE_STATUS: { field: 'getWebUIUpdateStatus', subscription: 'webUIUpdateStatusChange' },
+    };
+    page.on('websocket', socket => {
+        const url = new URL(socket.url());
+        url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
+        if (url.origin !== base.origin || url.pathname !== base.pathname + 'api/graphql') return;
+        const document = documentId();
+        socket.on('framereceived', frame => {
+            let message;
+            try {
+                message = JSON.parse(frame.payload);
+            } catch {
+                return;
+            }
+            if (message.type !== 'next' || message.payload?.errors) return;
+            for (const { subscription } of Object.values(statusQueries)) {
+                const state = message.payload?.data?.[subscription]?.state;
+                if (typeof state === 'string' && /^[A-Z_]+$/.test(state)) {
+                    subscriptionData.add(`${document}:${subscription}`);
+                }
+            }
+        });
+    });
     page.on('request', request => {
         const url = new URL(request.url());
         if (url.origin !== base.origin || url.pathname !== base.pathname + 'api/graphql' ||
@@ -40,7 +66,11 @@ export function trackQueryReplacements(page, base, documentId) {
         const signature = createHash('sha256').update(JSON.stringify({
             query: body.query, variables: body.variables || {},
         })).digest('hex');
-        requests.set(request, { signature, document: documentId() });
+        const operation = body.operationName || /\bquery\s+([A-Za-z_][A-Za-z_0-9]*)/.exec(body.query)?.[1];
+        const status = statusQueries[operation];
+        const suppliedBySubscription = status && Object.keys(body.variables || {}).length === 0 &&
+            new RegExp(`\\b${status.field}\\s*\\{`).test(body.query) ? status.subscription : undefined;
+        requests.set(request, { signature, document: documentId(), suppliedBySubscription });
     });
     page.on('requestfailed', request => {
         const tracked = requests.get(request);
@@ -55,6 +85,8 @@ export function trackQueryReplacements(page, base, documentId) {
     return async request => {
         const aborted = requests.get(request);
         if (!aborted?.aborted || request.failure()?.errorText !== 'net::ERR_ABORTED') return false;
+        if (aborted.suppliedBySubscription &&
+            subscriptionData.has(`${aborted.document}:${aborted.suppliedBySubscription}`)) return true;
         for (const replacement of responses) {
             if (replacement.document !== aborted.document || replacement.signature !== aborted.signature) continue;
             let result;

@@ -63,6 +63,26 @@ test('a cancelled duplicate query requires successful identical data in the same
     page.emit('request', fragmentMutation);
     page.emit('requestfailed', fragmentMutation);
     assert.equal(await satisfied(fragmentMutation), false, 'Fragments must not hide mutations');
+    const statusQuery = query('query GET_WEBUI_UPDATE_STATUS { getWebUIUpdateStatus { state } }');
+    page.emit('request', statusQuery);
+    page.emit('requestfailed', statusQuery);
+    assert.equal(await satisfied(statusQuery), false, 'An uncached status cancellation must fail');
+    const socket = new EventEmitter();
+    socket.url = () => 'ws://localhost/api/hassio_ingress/test/api/graphql';
+    page.emit('websocket', socket);
+    socket.emit('framereceived', { payload: JSON.stringify({
+        type: 'next', payload: { errors: [{ message: 'Unauthorized' }] },
+    }) });
+    assert.equal(await satisfied(statusQuery), false, 'An unauthorized subscription is not cache data');
+    socket.emit('framereceived', { payload: JSON.stringify({
+        type: 'next', payload: { data: { webUIUpdateStatusChange: { state: 'IDLE' } } },
+    }) });
+    assert.equal(await satisfied(statusQuery), true, 'Verified live subscription data supplies the known status cache');
+    document += 1;
+    const laterStatus = query('query GET_WEBUI_UPDATE_STATUS { getWebUIUpdateStatus { state } }');
+    page.emit('request', laterStatus);
+    page.emit('requestfailed', laterStatus);
+    assert.equal(await satisfied(laterStatus), false, 'Old subscription data cannot satisfy a new document');
 });
 
 test('only navigation-cancelled same-origin GraphQL POSTs are classified as expected', async () => {

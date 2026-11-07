@@ -83,7 +83,10 @@ manga instead of merely showing a page shell. Run the Chromium regressions with
 dependencies and Playwright Chromium.
 Newer Apollo-based preview UIs also cancel redundant queries during initialization.
 A cancelled query is accepted only when an identical query and variables in the
-same document delivered HTTP 200 with actual data and no GraphQL errors.
+same document delivered HTTP 200 with actual data and no GraphQL errors, or when
+the two known download/WebUI status caches received valid live subscription
+states in that same document. The latter matches the upstream Apollo cache
+updates, rather than blindly accepting cancelled startup status queries.
 Unmatched cancellations, mutations, failed responses and responses from another
 document still fail; API cancellation is not blanket-ignored.
 The native JWT expiry smoke test expires a one-second fixture token, verifies
