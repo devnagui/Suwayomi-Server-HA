@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8
+
+- Automatically repackage [upstream Suwayomi server 7b061be09c9b](https://github.com/Suwayomi/Suwayomi-Server/commit/7b061be09c9b62a89a63addd11ac91c40fc2510f) with verified compatible WebUI r3578.
+- Publish only after amd64 and ARM64 build, ingress/API/browser and USB library-persistence tests pass.
+
 ## 0.1.7
 
 - Automatically repackage [upstream Suwayomi server 7b061be09c9b](https://github.com/Suwayomi/Suwayomi-Server/commit/7b061be09c9b62a89a63addd11ac91c40fc2510f) with verified compatible WebUI r3574.
