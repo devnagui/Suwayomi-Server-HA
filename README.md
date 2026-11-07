@@ -68,6 +68,14 @@ commit alone means the images are available.
 
 ## Updating and contributing
 
+The browser release gate attributes same-origin GraphQL POST cancellations to
+explicit test navigation, including the service-worker reload after subscription
+checks. Only `net::ERR_ABORTED` during those navigations is expected; idle API
+failures, other network errors, HTTP failures and asset/JavaScript failures still
+fail the gate. Run its focused Chromium regression tests with
+`node --test tests/browser_ready.test.mjs` after installing the locked test
+dependencies and Playwright Chromium.
+
 The GitHub pipeline checks upstream master and compatible WebUI releases on
 pushes and daily at **04:15 UTC**. When either changes, the pipeline increments
 the HA patch version, builds and tests both

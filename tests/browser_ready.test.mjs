@@ -3,7 +3,91 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import { chromium } from 'playwright';
-import { trackAppAssets } from './browser_ready.mjs';
+import { trackAppAssets, trackAppNavigation } from './browser_ready.mjs';
+
+test('only navigation-cancelled same-origin GraphQL POSTs are classified as expected', async () => {
+    const listeners = new Map();
+    const page = {
+        on: (event, listener) => listeners.set(event, listener),
+        async goto() {
+            for (const request of requests) listeners.get('requestfailed')(request);
+            return 'navigated';
+        },
+    };
+    const request = (url, method = 'POST', errorText = 'net::ERR_ABORTED') => ({
+        url: () => url, method: () => method, failure: () => ({ errorText }),
+    });
+    const base = new URL('http://localhost/api/hassio_ingress/test/');
+    const requests = [
+        request(new URL('api/graphql', base).href),
+        request(new URL('assets/missing.js', base).href),
+        request('http://elsewhere/api/graphql'),
+        request(new URL('api/graphql', base).href, 'GET'),
+        request(new URL('api/graphql', base).href, 'POST', 'net::ERR_CONNECTION_RESET'),
+    ];
+    const navigation = trackAppNavigation(page, base);
+    assert.equal(await navigation.goto(base.href), 'navigated');
+    assert.deepEqual(requests.map(navigation.isNavigationAbort), [true, false, false, false, false]);
+    const idleFailure = request(new URL('api/graphql', base).href);
+    listeners.get('requestfailed')(idleFailure);
+    assert.equal(navigation.isNavigationAbort(idleFailure), false);
+    page.goto = async () => { throw new Error('Navigation failed'); };
+    await assert.rejects(navigation.goto(base.href), /Navigation failed/);
+    const failureAfterNavigation = request(new URL('api/graphql', base).href);
+    listeners.get('requestfailed')(failureAfterNavigation);
+    assert.equal(navigation.isNavigationAbort(failureAfterNavigation), false);
+});
+
+test('reload cancels background GraphQL without hiding assets or idle request failures', async () => {
+    const pendingResponses = new Set();
+    const server = createServer((request, response) => {
+        if (request.url === '/api/hassio_ingress/test/api/graphql') {
+            pendingResponses.add(response);
+            response.on('close', () => pendingResponses.delete(response));
+            return;
+        }
+        response.writeHead(200, { 'Content-Type': 'text/html' });
+        response.end('<div id="root"><svg width="20" height="20"></svg></div>');
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        const base = new URL(`http://127.0.0.1:${server.address().port}/api/hassio_ingress/test/`);
+        const navigation = trackAppNavigation(page, base);
+        const failures = [];
+        page.on('requestfailed', request => failures.push({
+            expected: navigation.isNavigationAbort(request), url: request.url(),
+        }));
+        await navigation.goto(base.href);
+        const started = page.waitForRequest('**/api/graphql');
+        await page.evaluate(() => {
+            globalThis.controller = new AbortController();
+            fetch('api/graphql', { method: 'POST', signal: controller.signal }).catch(() => {});
+        });
+        await started;
+        const cancelled = page.waitForEvent('requestfailed');
+        await navigation.goto(base.href);
+        await cancelled;
+        assert.ok(failures.some(failure => failure.expected), 'Fixture must exercise a real navigation abort');
+        const idleRequest = page.waitForRequest('**/api/graphql');
+        await page.evaluate(() => {
+            globalThis.controller = new AbortController();
+            fetch('api/graphql', { method: 'POST', signal: controller.signal }).catch(() => {});
+        });
+        await idleRequest;
+        const idleCancelled = page.waitForEvent('requestfailed');
+        await page.evaluate(() => controller.abort());
+        await idleCancelled;
+        assert.equal(failures.at(-1).expected, false, 'Idle API failures must still fail the gate');
+    } finally {
+        await browser?.close();
+        for (const response of pendingResponses) response.destroy();
+        await new Promise(resolve => server.close(resolve));
+    }
+});
 
 test('route checks finish lazy login assets before navigating away', async () => {
     const server = createServer((request, response) => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { trackAppAssets } from './browser_ready.mjs';
+import { trackAppAssets, trackAppNavigation } from './browser_ready.mjs';
 
 const browser = await chromium.launch({ headless: true });
 const expectAuthFailure = process.argv.includes('--expect-ingress-auth-failure');
@@ -11,13 +11,14 @@ try {
             locale: 'en-US',
         });
         const page = await context.newPage();
+        const navigation = trackAppNavigation(page, base);
         const waitForAppReady = trackAppAssets(page, base);
         assert.equal(await page.evaluate(() => navigator.language), 'en-US');
         if (expectAuthFailure) {
             const messages = [];
             page.on('console', message => messages.push(message.text()));
             const denied = page.waitForResponse(response => response.url().endsWith('/__ha_auth/session') && response.status() === 503);
-            await page.goto(base.href, { waitUntil: 'domcontentloaded' });
+            await navigation.goto(base.href, { waitUntil: 'domcontentloaded' });
             await denied;
             await page.locator('#ha-ingress-auth-failure').waitFor({ state: 'visible' });
             assert.match(await page.locator('#ha-ingress-auth-failure').innerText(), /authentication failed.*redacted app logs/i);
@@ -27,7 +28,7 @@ try {
             await context.close();
             continue;
         }
-        await page.goto(base.href, { waitUntil: 'networkidle' });
+        await navigation.goto(base.href);
         let session;
         if (index === 1) {
             await page.getByLabel(/^Username$/i).fill(process.env.SUWAYOMI_TEST_USERNAME);
@@ -61,7 +62,6 @@ try {
         const externalFonts = new Set();
         const assets = new Set();
         const nativeRefreshes = [];
-        let navigating = false;
         page.on('pageerror', error => errors.push(error.message));
         page.on('console', message => {
             if (message.type() === 'error') consoleErrors.push(message.text());
@@ -72,8 +72,7 @@ try {
         });
         page.on('requestfailed', request => {
             const url = new URL(request.url());
-            if (navigating && url.origin === base.origin && url.pathname === base.pathname + 'api/graphql' &&
-                request.method() === 'POST' && request.failure()?.errorText === 'net::ERR_ABORTED') return;
+            if (navigation.isNavigationAbort(request)) return;
             if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
                 externalFonts.add(`${url.hostname}: ${request.failure()?.errorText}`);
             } else {
@@ -92,12 +91,7 @@ try {
             }
         });
         for (const route of ['', 'library', 'browse', 'downloads', 'updates', 'settings']) {
-            navigating = true;
-            try {
-                await page.goto(new URL(route, base).href, { waitUntil: 'networkidle' });
-            } finally {
-                navigating = false;
-            }
+            await navigation.goto(new URL(route, base).href);
             try {
                 await page.locator('#root').waitFor({ state: 'visible' });
             } catch (error) {
@@ -162,7 +156,7 @@ try {
         assert.ok(authenticated.payload.data.webUIUpdateStatusChange.state);
         const anonymous = await subscribe(null);
         assert.ok(anonymous.type === 'error' || anonymous.payload?.errors, 'Anonymous WebSocket received protected subscription data');
-        await page.goto(base.href, { waitUntil: 'networkidle' });
+        await navigation.goto(base.href);
         await waitForAppReady();
         const registration = await page.evaluate(async () => {
             const ready = await Promise.race([
@@ -202,12 +196,12 @@ try {
         }
         await page.evaluate(keys => keys.forEach(key => localStorage.removeItem(key)), refreshes);
         await context.clearCookies();
-        await page.goto(base.href, { waitUntil: 'networkidle' });
+        await navigation.goto(base.href);
         if (index === 1) await page.getByLabel(/^Username$/i).waitFor({ state: 'visible' });
         else assert.equal(await page.getByLabel(/^Username$/i).count(), 0, 'Fresh HA session lost automatic login');
         if (index === 1) {
             await page.evaluate(key => localStorage.setItem(key, 'invalid-refresh-token'), refreshes[0]);
-            await page.goto(base.href, { waitUntil: 'networkidle' });
+            await navigation.goto(base.href);
             await page.getByLabel(/^Username$/i).waitFor({ state: 'visible' });
         }
         if (externalFonts.size) {

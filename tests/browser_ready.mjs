@@ -1,3 +1,28 @@
+export function trackAppNavigation(page, base) {
+    const abortedRequests = new WeakSet();
+    let navigating = false;
+    page.on('requestfailed', request => {
+        const url = new URL(request.url());
+        if (navigating && url.origin === base.origin &&
+            url.pathname === base.pathname + 'api/graphql' &&
+            request.method() === 'POST' &&
+            request.failure()?.errorText === 'net::ERR_ABORTED') {
+            abortedRequests.add(request);
+        }
+    });
+    return {
+        isNavigationAbort: request => abortedRequests.has(request),
+        async goto(address, options = { waitUntil: 'networkidle' }) {
+            navigating = true;
+            try {
+                return await page.goto(address, options);
+            } finally {
+                navigating = false;
+            }
+        },
+    };
+}
+
 export function trackAppAssets(page, base) {
     const pending = new Set();
     const listeners = new Set();
