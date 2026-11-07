@@ -1,30 +1,52 @@
 export function trackAppNavigation(page, base) {
     const abortedRequests = new WeakSet();
     const activeRequests = new Set();
-    let previousDocumentRequests = new Set();
+    const previousDocumentRequests = new WeakSet();
+    let navigationCommitted = false;
+    let navigationRequests = new Set();
     let navigating = false;
-    page.on('request', request => activeRequests.add(request));
-    page.on('requestfinished', request => activeRequests.delete(request));
+    page.on('request', request => {
+        activeRequests.add(request);
+        if (navigating && !navigationCommitted) {
+            previousDocumentRequests.add(request);
+            navigationRequests.add(request);
+        }
+    });
+    page.on('framenavigated', frame => {
+        if (navigating && frame === page.mainFrame()) navigationCommitted = true;
+    });
+    page.on('requestfinished', request => {
+        activeRequests.delete(request);
+        previousDocumentRequests.delete(request);
+    });
     page.on('requestfailed', request => {
         activeRequests.delete(request);
         const url = new URL(request.url());
-        if (navigating && previousDocumentRequests.has(request) && url.origin === base.origin &&
+        if (previousDocumentRequests.has(request) && url.origin === base.origin &&
             url.pathname === base.pathname + 'api/graphql' &&
             request.method() === 'POST' &&
             request.failure()?.errorText === 'net::ERR_ABORTED') {
             abortedRequests.add(request);
         }
+        previousDocumentRequests.delete(request);
     });
     return {
         isNavigationAbort: request => abortedRequests.has(request),
         async goto(address, options = { waitUntil: 'domcontentloaded' }) {
-            previousDocumentRequests = new Set(activeRequests);
+            navigationRequests = new Set(activeRequests);
+            for (const request of navigationRequests) previousDocumentRequests.add(request);
+            navigationCommitted = false;
             navigating = true;
             try {
                 return await page.goto(address, options);
+            } catch (error) {
+                if (!navigationCommitted) {
+                    for (const request of navigationRequests) previousDocumentRequests.delete(request);
+                }
+                throw error;
             } finally {
                 navigating = false;
-                previousDocumentRequests.clear();
+                navigationRequests.clear();
             }
         },
     };
@@ -35,8 +57,11 @@ export function trackAppAssets(page, base, ready = page.locator('#root svg:visib
     const listeners = new Set();
     const notify = () => listeners.forEach(listener => listener());
     page.on('request', request => {
-        if (new URL(request.url()).origin === base.origin &&
-            ['script', 'stylesheet', 'image', 'font'].includes(request.resourceType())) {
+        const url = new URL(request.url());
+        const media = url.pathname.startsWith(base.pathname + 'api/v1/') &&
+            /\/(?:thumbnail|page\/\d+)$/.test(url.pathname);
+        if (url.origin === base.origin &&
+            (['script', 'stylesheet', 'image', 'font'].includes(request.resourceType()) || media)) {
             pending.add(request);
             notify();
         }

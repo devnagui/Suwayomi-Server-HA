@@ -8,6 +8,7 @@ import { trackAppAssets, trackAppNavigation } from './browser_ready.mjs';
 test('only navigation-cancelled same-origin GraphQL POSTs are classified as expected', async () => {
     const listeners = new Map();
     const page = {
+        mainFrame: () => 'main-frame',
         on: (event, listener) => listeners.set(event, listener),
         async goto() {
             for (const request of requests) listeners.get('requestfailed')(request);
@@ -39,12 +40,20 @@ test('only navigation-cancelled same-origin GraphQL POSTs are classified as expe
     assert.equal(navigation.isNavigationAbort(failureAfterNavigation), false);
     const newDocumentFailure = request(new URL('api/graphql', base).href);
     page.goto = async () => {
+        listeners.get('framenavigated')(page.mainFrame());
         listeners.get('request')(newDocumentFailure);
         listeners.get('requestfailed')(newDocumentFailure);
     };
     await navigation.goto(base.href);
     assert.equal(navigation.isNavigationAbort(newDocumentFailure), false,
         'A new document failure must not be mistaken for a cancelled old request');
+    const lateFailure = request(new URL('api/graphql', base).href);
+    listeners.get('request')(lateFailure);
+    page.goto = async () => listeners.get('framenavigated')(page.mainFrame());
+    await navigation.goto(base.href);
+    listeners.get('requestfailed')(lateFailure);
+    assert.equal(navigation.isNavigationAbort(lateFailure), true,
+        'An old document cancellation may be reported after DOM navigation completes');
 });
 
 test('reload cancels background GraphQL without hiding assets or idle request failures', async () => {
@@ -202,6 +211,39 @@ test('app readiness is independent of background GraphQL network idleness', asyn
     } finally {
         await browser?.close();
         for (const response of pendingResponses) response.destroy();
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('thumbnail blob fetches settle before navigating away', async () => {
+    const server = createServer((request, response) => {
+        if (request.url.endsWith('/api/v1/manga/1/thumbnail')) {
+            setTimeout(() => {
+                response.writeHead(200, { 'Content-Type': 'image/png' });
+                response.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8WsAAAAASUVORK5CYII=', 'base64'));
+            }, 1000);
+            return;
+        }
+        response.writeHead(200, { 'Content-Type': 'text/html' });
+        response.end('<div id="root"><svg width="20" height="20"></svg></div><script>fetch("api/v1/manga/1/thumbnail").then(response => response.blob()).then(() => globalThis.thumbnailLoaded = true);</script>');
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        const base = new URL(`http://127.0.0.1:${server.address().port}/api/hassio_ingress/test/`);
+        const navigation = trackAppNavigation(page, base);
+        const waitForAppReady = trackAppAssets(page, base);
+        const started = page.waitForRequest('**/thumbnail');
+        await navigation.goto(base.href);
+        await started;
+        assert.equal(await page.evaluate(() => globalThis.thumbnailLoaded), undefined);
+        await waitForAppReady();
+        assert.equal(await page.evaluate(() => globalThis.thumbnailLoaded), true);
+    } finally {
+        await browser?.close();
         await new Promise(resolve => server.close(resolve));
     }
 });

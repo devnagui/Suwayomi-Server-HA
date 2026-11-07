@@ -86,7 +86,15 @@ try {
             if (/\.(js|css|woff2?|svg|png)$/.test(url.pathname)) assets.add(url.pathname);
             if (url.pathname.endsWith('/__ha_auth/session') ||
                 (url.pathname.endsWith('/api/graphql') && response.request().postData()?.includes('refreshToken'))) {
-                const result = await response.json();
+                let result;
+                try {
+                    result = await response.json();
+                } catch {
+                    if (!navigation.isNavigationAbort(response.request())) {
+                        errors.push(`Session response could not be decoded: ${url.pathname}`);
+                    }
+                    return;
+                }
                 if (result.data?.refreshToken?.accessToken) nativeRefreshes.push(result.data.refreshToken.accessToken);
             }
         });
@@ -107,6 +115,9 @@ try {
                 }
             }
             assert.ok(await page.locator('svg').count() > 0, `No rendered icons on ${route}`);
+            if (route === 'library') {
+                await page.getByText('HA authentication fixture', { exact: true }).first().waitFor({ state: 'visible' });
+            }
             const result = await page.evaluate(async token => {
                 const endpoint = new URL('api/graphql', document.baseURI);
                 const response = await fetch(endpoint, {

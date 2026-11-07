@@ -75,7 +75,10 @@ during those navigations is expected; new-document failures, idle API
 failures, other network errors, HTTP failures and asset/JavaScript failures still
 fail the gate. Readiness is based on visible app content and settled app-owned
 assets, not global network idleness: background GraphQL activity must not prevent
-an otherwise ready page or iframe from being tested. Run the Chromium regressions with
+an otherwise ready page or iframe from being tested. Fetch-based thumbnails are
+included in readiness, delayed old-document cancellation events remain attributed
+to their navigation, and the browser must actually render the seeded library
+manga instead of merely showing a page shell. Run the Chromium regressions with
 `node --test tests/browser_ready.test.mjs` after installing the locked test
 dependencies and Playwright Chromium.
 The native JWT expiry smoke test expires a one-second fixture token, verifies
