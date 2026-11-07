@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { trackAppAssets } from './browser_ready.mjs';
+import { trackAppAssets, trackAppNavigation, trackQueryReplacements } from './browser_ready.mjs';
 
 const browser = await chromium.launch({ headless: true });
 const expectAuthFailure = process.argv.includes('--expect-ingress-auth-failure');
@@ -11,13 +11,15 @@ try {
             locale: 'en-US',
         });
         const page = await context.newPage();
+        const navigation = trackAppNavigation(page, base);
+        const isReplacedQuery = trackQueryReplacements(page, base, navigation.documentId);
         const waitForAppReady = trackAppAssets(page, base);
         assert.equal(await page.evaluate(() => navigator.language), 'en-US');
         if (expectAuthFailure) {
             const messages = [];
             page.on('console', message => messages.push(message.text()));
             const denied = page.waitForResponse(response => response.url().endsWith('/__ha_auth/session') && response.status() === 503);
-            await page.goto(base.href, { waitUntil: 'domcontentloaded' });
+            await navigation.goto(base.href, { waitUntil: 'domcontentloaded' });
             await denied;
             await page.locator('#ha-ingress-auth-failure').waitFor({ state: 'visible' });
             assert.match(await page.locator('#ha-ingress-auth-failure').innerText(), /authentication failed.*redacted app logs/i);
@@ -27,7 +29,7 @@ try {
             await context.close();
             continue;
         }
-        await page.goto(base.href, { waitUntil: 'networkidle' });
+        await navigation.goto(base.href);
         let session;
         if (index === 1) {
             await page.getByLabel(/^Username$/i).fill(process.env.SUWAYOMI_TEST_USERNAME);
@@ -61,7 +63,19 @@ try {
         const externalFonts = new Set();
         const assets = new Set();
         const nativeRefreshes = [];
-        let navigating = false;
+        const cancelledQueries = [];
+        const assertNoBrowserErrors = async message => {
+            for (const request of cancelledQueries.splice(0)) {
+                if (!await isReplacedQuery(request)) {
+                    const url = new URL(request.url());
+                    const body = request.postData() || '';
+                    const operation = /"operationName"\s*:\s*"([A-Za-z_][A-Za-z_0-9]*)"/.exec(body)?.[1] ||
+                        /\b(?:query|mutation)\s+([A-Za-z_][A-Za-z_0-9]*)/.exec(body)?.[1] || 'unnamed';
+                    errors.push(`${url.hostname}${url.pathname} (${operation}): ${request.failure()?.errorText}`);
+                }
+            }
+            assert.deepEqual(errors, [], message);
+        };
         page.on('pageerror', error => errors.push(error.message));
         page.on('console', message => {
             if (message.type() === 'error') consoleErrors.push(message.text());
@@ -72,8 +86,12 @@ try {
         });
         page.on('requestfailed', request => {
             const url = new URL(request.url());
-            if (navigating && url.origin === base.origin && url.pathname === base.pathname + 'api/graphql' &&
-                request.method() === 'POST' && request.failure()?.errorText === 'net::ERR_ABORTED') return;
+            if (navigation.isNavigationAbort(request)) return;
+            if (url.origin === base.origin && url.pathname === base.pathname + 'api/graphql' &&
+                request.method() === 'POST' && request.failure()?.errorText === 'net::ERR_ABORTED') {
+                cancelledQueries.push(request);
+                return;
+            }
             if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
                 externalFonts.add(`${url.hostname}: ${request.failure()?.errorText}`);
             } else {
@@ -87,17 +105,20 @@ try {
             if (/\.(js|css|woff2?|svg|png)$/.test(url.pathname)) assets.add(url.pathname);
             if (url.pathname.endsWith('/__ha_auth/session') ||
                 (url.pathname.endsWith('/api/graphql') && response.request().postData()?.includes('refreshToken'))) {
-                const result = await response.json();
+                let result;
+                try {
+                    result = await response.json();
+                } catch {
+                    if (!navigation.isNavigationAbort(response.request())) {
+                        errors.push(`Session response could not be decoded: ${url.pathname}`);
+                    }
+                    return;
+                }
                 if (result.data?.refreshToken?.accessToken) nativeRefreshes.push(result.data.refreshToken.accessToken);
             }
         });
         for (const route of ['', 'library', 'browse', 'downloads', 'updates', 'settings']) {
-            navigating = true;
-            try {
-                await page.goto(new URL(route, base).href, { waitUntil: 'networkidle' });
-            } finally {
-                navigating = false;
-            }
+            await navigation.goto(new URL(route, base).href);
             try {
                 await page.locator('#root').waitFor({ state: 'visible' });
             } catch (error) {
@@ -113,6 +134,9 @@ try {
                 }
             }
             assert.ok(await page.locator('svg').count() > 0, `No rendered icons on ${route}`);
+            if (route === 'library') {
+                await page.getByText('HA authentication fixture', { exact: true }).first().waitFor({ state: 'visible' });
+            }
             const result = await page.evaluate(async token => {
                 const endpoint = new URL('api/graphql', document.baseURI);
                 const response = await fetch(endpoint, {
@@ -128,7 +152,7 @@ try {
         assert.ok(assets.size >= 10, 'Too few real browser assets were exercised');
         assert.ok(nativeRefreshes.length >= 6, 'Native WebUI did not refresh its session on route reloads');
         session.accessToken = nativeRefreshes.at(-1);
-        assert.deepEqual(errors, [], 'Browser, HTTP or asset failures');
+        await assertNoBrowserErrors('Browser, HTTP or asset failures');
         const subscribe = token => page.evaluate(token => new Promise((resolve, reject) => {
             const endpoint = new URL('api/graphql', document.baseURI);
             endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -162,7 +186,7 @@ try {
         assert.ok(authenticated.payload.data.webUIUpdateStatusChange.state);
         const anonymous = await subscribe(null);
         assert.ok(anonymous.type === 'error' || anonymous.payload?.errors, 'Anonymous WebSocket received protected subscription data');
-        await page.goto(base.href, { waitUntil: 'networkidle' });
+        await navigation.goto(base.href);
         await waitForAppReady();
         const registration = await page.evaluate(async () => {
             const ready = await Promise.race([
@@ -180,8 +204,9 @@ try {
                 const url = new URL(response.url());
                 if (url.origin === base.origin && response.status() >= 400) errors.push(`Iframe HTTP ${response.status()} ${url.pathname}`);
             });
-            await host.goto(base.origin + '/', { waitUntil: 'networkidle' });
             const iframe = host.frameLocator('iframe');
+            const waitForIframeReady = trackAppAssets(host, base, iframe.locator('#root svg:visible').first());
+            await host.goto(base.origin + '/', { waitUntil: 'domcontentloaded' });
             await iframe.locator('#root svg:visible').first().waitFor({ state: 'visible' });
             assert.equal(await iframe.getByLabel(/^Username$/i).count(), 0, 'HA iframe requested a second login');
             assert.equal(await iframe.locator('base').getAttribute('href'), base.pathname);
@@ -190,10 +215,10 @@ try {
                 return { fontFamily: computed.fontFamily, backgroundColor: computed.backgroundColor };
             });
             assert.ok(style.fontFamily && style.backgroundColor, 'Iframe styles did not load');
-            await host.waitForLoadState('networkidle');
+            await waitForIframeReady();
             await host.close();
         }
-        assert.deepEqual(errors, [], 'Browser, iframe or asset failures');
+        await assertNoBrowserErrors('Browser, iframe or asset failures');
         const refreshes = await page.evaluate(() => Object.keys(localStorage).filter(key => key.includes('auth-refresh-token')));
         assert.equal(refreshes.length, 1, 'Native UI did not persist its scoped refresh session');
         if (index === 0) {
@@ -202,12 +227,12 @@ try {
         }
         await page.evaluate(keys => keys.forEach(key => localStorage.removeItem(key)), refreshes);
         await context.clearCookies();
-        await page.goto(base.href, { waitUntil: 'networkidle' });
+        await navigation.goto(base.href);
         if (index === 1) await page.getByLabel(/^Username$/i).waitFor({ state: 'visible' });
         else assert.equal(await page.getByLabel(/^Username$/i).count(), 0, 'Fresh HA session lost automatic login');
         if (index === 1) {
             await page.evaluate(key => localStorage.setItem(key, 'invalid-refresh-token'), refreshes[0]);
-            await page.goto(base.href, { waitUntil: 'networkidle' });
+            await navigation.goto(base.href);
             await page.getByLabel(/^Username$/i).waitFor({ state: 'visible' });
         }
         if (externalFonts.size) {

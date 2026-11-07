@@ -18,11 +18,12 @@ permissions:
 
 concurrency:
   group: suwayomi-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       build: ${{ steps.pins.outputs.build }}
       publish: ${{ steps.pins.outputs.publish }}
@@ -38,9 +39,13 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
+      - name: Verify bounded metadata retries
+        run: node --test scripts/release-reliability.test.cjs
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Verify selective Gradle download retries
+        run: python scripts/test_gradle_retry.py
       - run: pip install -r tests/requirements-suwayomi.txt
       - name: Check upstream without committing untested metadata
         if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_upstream)
@@ -53,7 +58,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python - <<'PY'
-          import json, os, subprocess, urllib.request, urllib.error, yaml
+          import json, os, subprocess, yaml
           from pathlib import Path
           config = yaml.safe_load(Path("suwayomi/config.yaml").read_text())
           build = yaml.safe_load(Path("suwayomi/build.yaml").read_text())
@@ -64,17 +69,16 @@ jobs:
           should_build = os.environ["GITHUB_EVENT_NAME"] != "schedule" or changed
           publish = should_build and os.environ["GITHUB_EVENT_NAME"] != "pull_request" and os.environ["GITHUB_REF"] == "refs/heads/main"
           if publish:
-              request = urllib.request.Request(
-                  f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/releases/tags/v{config['version']}",
-                  headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"], "Accept": "application/vnd.github+json"},
+              release = subprocess.run(
+                  ["node", "scripts/github-metadata.cjs",
+                   f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/releases/tags/v{config['version']}"],
+                  check=True, stdout=subprocess.PIPE, text=True, timeout=90,
               )
-              try:
-                  with urllib.request.urlopen(request, timeout=20):
-                      publish = False
-                      print("This HA version is already released; tests will run without overwriting its images.")
-              except urllib.error.HTTPError as error:
-                  if error.code != 404:
-                      raise
+              if release.stdout.strip() == "200":
+                  publish = False
+                  print("This HA version is already released; tests will run without overwriting its images.")
+              elif release.stdout.strip() != "404":
+                  raise SystemExit("Unexpected upstream release metadata status")
           values = {
               "version": config["version"], "source": build["args"]["SOURCE_REF"],
               "webui": build["args"]["WEBUI_REF"], "webui_sha256": build["args"]["WEBUI_SHA256"],
@@ -99,6 +103,7 @@ jobs:
 
   build:
     needs: prepare
+    timeout-minutes: 40
     if: needs.prepare.outputs.build == 'true'
     strategy:
       fail-fast: false
@@ -182,6 +187,7 @@ jobs:
 
   publish:
     needs: [prepare, build]
+    timeout-minutes: 15
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:

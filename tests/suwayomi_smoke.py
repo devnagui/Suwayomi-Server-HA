@@ -7,6 +7,7 @@ import secrets
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -19,10 +20,44 @@ import yaml
 
 ROOT = Path(__file__).parents[1]
 PREFIX = "/api/hassio_ingress/suwayomi-test-session"
+SENSITIVE_VALUES = set()
+
+
+def remember_secrets(value) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in ("password", "auth_password", "accessToken", "refreshToken") and isinstance(item, str) and item:
+                SENSITIVE_VALUES.add(item)
+            else:
+                remember_secrets(item)
+    elif isinstance(value, list):
+        for item in value:
+            remember_secrets(item)
+
+
+def redact(message: str) -> str:
+    for value in sorted(SENSITIVE_VALUES, key=len, reverse=True):
+        for encoded in (value, json.dumps(value)[1:-1]):
+            message = message.replace(encoded, "<redacted>")
+    return re.sub(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", "<redacted-jwt>", message)
 
 
 def docker(*arguments: str) -> str:
-    return subprocess.check_output(["docker", *arguments], text=True, stderr=subprocess.STDOUT).strip()
+    try:
+        return subprocess.check_output(
+            ["docker", *arguments], text=True, stderr=subprocess.STDOUT, timeout=180,
+        ).strip()
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Docker {arguments[0]} exceeded its 180-second deadline (command details redacted)") from None
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"Docker {arguments[0]} failed with exit code {error.returncode} (command details redacted)") from None
+
+
+def print_failure_logs(name: str, lines: str) -> None:
+    try:
+        print(redact(docker("logs", "--tail", lines, name)), flush=True)
+    except RuntimeError as error:
+        print(f"Could not collect container failure logs: {error}", flush=True)
 
 
 def request(url: str, authorization: str = "", ingress: str = "") -> tuple[int, bytes]:
@@ -42,7 +77,7 @@ def wait_for_app(name: str, url: str, expected: int, authorization: str) -> None
     deadline = time.monotonic() + 150
     while time.monotonic() < deadline:
         if docker("inspect", "--format", "{{.State.Running}}", name) != "true":
-            print(docker("logs", "--tail", "80", name))
+            print_failure_logs(name, "80")
             raise RuntimeError("App exited before becoming ready")
         try:
             if request(url, authorization)[0] == expected:
@@ -50,7 +85,7 @@ def wait_for_app(name: str, url: str, expected: int, authorization: str) -> None
         except (urllib.error.URLError, ConnectionError, TimeoutError):
             pass
         time.sleep(1)
-    print(docker("logs", "--tail", "80", name))
+    print_failure_logs(name, "80")
     raise RuntimeError("App did not reach its expected HTTP state within 150 seconds")
 
 
@@ -65,6 +100,9 @@ def make_test_certificate(image: str, directory: Path) -> None:
 
 
 def graphql(url: str, query: str, variables: dict | None = None, token: str = "", headers: dict | None = None) -> dict:
+    remember_secrets(variables)
+    if token:
+        SENSITIVE_VALUES.add(token)
     request_headers = {"Content-Type": "application/json"} | (headers or {})
     if token:
         request_headers["Authorization"] = "Bearer " + token
@@ -74,7 +112,11 @@ def graphql(url: str, query: str, variables: dict | None = None, token: str = ""
     )
     with urllib.request.urlopen(message, timeout=15) as response:
         assert response.status == 200
-        return json.load(response)
+        result = json.load(response)
+        if not isinstance(result, dict):
+            raise RuntimeError("GraphQL returned an invalid response object (body redacted)")
+        remember_secrets(result)
+        return result
 
 
 def certificate_peer(port: int, ca: Path) -> bytes:
@@ -83,6 +125,66 @@ def certificate_peer(port: int, ca: Path) -> bytes:
         with context.wrap_socket(connection, server_hostname="localhost") as secured:
             assert secured.version() in ("TLSv1.2", "TLSv1.3")
             return secured.getpeercert(binary_form=True)
+
+
+def verify_native_token_expiry(direct_url: str, login_query: str, options: dict,
+                               authorization: str, media_path: str) -> dict:
+    expiry_setting = graphql(direct_url,
+        'mutation{setSettings(input:{settings:{jwtTokenExpiry:"1s"}}){settings{jwtTokenExpiry}}}', token=authorization)
+    assert "errors" not in expiry_setting, "Could not configure the disposable fixture's short native token"
+    expiring = graphql(direct_url, login_query,
+        {"input":{"username":options["auth_username"],"password":options["auth_password"]}})["data"]["login"]
+    wait_for_token_expiry(expiring["accessToken"])
+    assert "errors" in graphql(direct_url, "{user{id}}", token=expiring["accessToken"]), "Expired native JWT remained authenticated"
+    assert request(direct_url + media_path, expiring["accessToken"])[0] == 401, "Expired native JWT accessed media"
+    # Keep the old token expired, but give its replacement enough lifetime for slow runners.
+    assert "errors" not in graphql(direct_url,
+        'mutation{setSettings(input:{settings:{jwtTokenExpiry:"5m"}}){settings{jwtTokenExpiry}}}', token=authorization)
+    refreshed = graphql(direct_url, "mutation($input:RefreshTokenInput!){refreshToken(input:$input){accessToken}}",
+        {"input":{"refreshToken":expiring["refreshToken"]}}, token=expiring["accessToken"])
+    assert "errors" not in refreshed, "Native direct client could not refresh an expired access token"
+    identity = graphql(direct_url, "{user{id}}", token=refreshed["data"]["refreshToken"]["accessToken"])
+    assert identity == {"data": {"user": {"id": 1}}}, "Refreshed native token did not restore administrator identity"
+    return expiring
+
+
+def wait_for_token_expiry(token: str) -> None:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError("Invalid token")
+        payload = parts[1]
+        expiry = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["exp"]
+        if type(expiry) is not int:
+            raise ValueError("Invalid expiry")
+    except (ValueError, KeyError, TypeError):
+        raise RuntimeError("Disposable expiry-test JWT has invalid expiry claims (token redacted)") from None
+    remaining = expiry - time.time()
+    if expiry <= 0 or remaining > 5:
+        raise RuntimeError("Disposable one-second JWT has an unexpected lifetime (token redacted)")
+    deadline = time.monotonic() + 7
+    while time.time() <= expiry:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Disposable JWT did not expire within its bounded test deadline")
+        time.sleep(min(0.1, max(0.01, expiry - time.time() + 0.01)))
+
+
+def cleanup_resources(resources: list[tuple[str, str]], primary_failure: bool) -> None:
+    failures = []
+    for kind, name in resources:
+        command = ["docker", kind, "rm", name] if kind != "container" else ["docker", "rm", "--force", name]
+        try:
+            result = subprocess.run(command, timeout=90, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                failures.append(f"{kind} cleanup failed with exit code {result.returncode}")
+        except (subprocess.TimeoutExpired, OSError):
+            failures.append(f"{kind} cleanup failed or exceeded its 90-second deadline")
+    if failures:
+        message = "; ".join(failures)
+        if primary_failure:
+            print("Additional cleanup failures: " + message, flush=True)
+        else:
+            raise RuntimeError(message)
 
 
 def main() -> None:
@@ -125,6 +227,7 @@ def main() -> None:
             ssl=arguments.tls,
             webui_channel=arguments.webui_channel,
         )
+        remember_secrets(options)
         tls_directory = data / "ssl"
         tls_mounts = []
         if arguments.tls:
@@ -382,21 +485,9 @@ def main() -> None:
                 environment = os.environ | {"SUWAYOMI_TEST_USERNAME":options["auth_username"], "SUWAYOMI_TEST_PASSWORD":options["auth_password"]}
                 subprocess.run(
                     ["node", str(ROOT / "tests" / "suwayomi_browser.mjs"), ingress_url, direct_url + "/"],
-                    env=environment, check=True,
+                    env=environment, check=True, timeout=600,
                 )
-            expiry_setting = graphql(direct_url,
-                'mutation{setSettings(input:{settings:{jwtTokenExpiry:"1s"}}){settings{jwtTokenExpiry}}}', token=authorization)
-            assert "errors" not in expiry_setting, "Could not configure the disposable fixture's short native token"
-            expiring = graphql(direct_url, login_query, {"input":{"username":options["auth_username"],"password":options["auth_password"]}})["data"]["login"]
-            time.sleep(2)
-            assert "errors" in graphql(direct_url, "{user{id}}", token=expiring["accessToken"]), "Expired native JWT remained authenticated"
-            assert request(direct_url + manga["thumbnailUrl"], expiring["accessToken"])[0] == 401, "Expired native JWT accessed media"
-            refreshed = graphql(direct_url, "mutation($input:RefreshTokenInput!){refreshToken(input:$input){accessToken}}",
-                {"input":{"refreshToken":expiring["refreshToken"]}}, token=expiring["accessToken"])
-            assert "errors" not in refreshed, "Native direct client could not refresh an expired access token"
-            assert graphql(direct_url, "{user{id}}", token=refreshed["data"]["refreshToken"]["accessToken"])["data"]["user"]["id"] == 1
-            assert "errors" not in graphql(direct_url,
-                'mutation{setSettings(input:{settings:{jwtTokenExpiry:"5m"}}){settings{jwtTokenExpiry}}}', token=authorization)
+            expiring = verify_native_token_expiry(direct_url, login_query, options, authorization, manga["thumbnailUrl"])
             print("PASS: actual native access-token expiry rejects direct library/media; refresh accepts expired Bearer Authorization and restores administrator identity", flush=True)
             marker = storage + "/ha-persistence-check"
             docker("exec", "--user", "1001", app, "python3", "-c", f"from pathlib import Path; Path({marker!r}).write_text('preserved')")
@@ -465,7 +556,7 @@ def main() -> None:
                 if arguments.browser:
                     subprocess.run(
                         ["node", str(ROOT / "tests" / "suwayomi_browser.mjs"), "--expect-ingress-auth-failure", ingress_url],
-                        check=True,
+                        check=True, timeout=120,
                     )
                 failure_logs = docker("logs", app)
                 assert all(value not in failure_logs for value in (options["auth_password"], broker_token, authorization, tokens["refreshToken"]))
@@ -474,22 +565,21 @@ def main() -> None:
             if arguments.browser_seconds:
                 print(f"Temporary simulated ingress browser URL: {ingress_url}", flush=True)
                 time.sleep(arguments.browser_seconds)
-        except (AssertionError, RuntimeError, subprocess.CalledProcessError, urllib.error.URLError, ConnectionError):
+        except (AssertionError, RuntimeError, subprocess.SubprocessError, urllib.error.URLError, ConnectionError,
+                KeyError, TypeError, ValueError):
             if app_created:
-                print(docker("logs", "--tail", "80", app), flush=True)
+                print_failure_logs(app, "80")
             if client_created:
-                print(docker("logs", "--tail", "30", client), flush=True)
+                print_failure_logs(client, "30")
             raise
         finally:
-            for name, created in ((client, client_created), (app, app_created)):
-                if created:
-                    subprocess.run(["docker", "rm", "--force", name], check=True, stdout=subprocess.DEVNULL)
-            if network_created:
-                subprocess.run(["docker", "network", "rm", identifier], check=True, stdout=subprocess.DEVNULL)
-            if volume_created:
-                subprocess.run(["docker", "volume", "rm", volume], check=True, stdout=subprocess.DEVNULL)
-            if usb_created:
-                subprocess.run(["docker", "volume", "rm", usb_volume], check=True, stdout=subprocess.DEVNULL)
+            cleanup_resources([
+                (kind, name) for kind, name, created in (
+                    ("container", client, client_created), ("container", app, app_created),
+                    ("network", identifier, network_created), ("volume", volume, volume_created),
+                    ("volume", usb_volume, usb_created),
+                ) if created
+            ], primary_failure=sys.exc_info()[0] is not None)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,100 @@ def options():
 
 
 class SuwayomiTests(unittest.TestCase):
+    def test_expiry_smoke_restores_normal_lifetime_before_refresh_on_slow_runners(self):
+        smoke_spec = importlib.util.spec_from_file_location("suwayomi_expiry_smoke", ROOT / "tests" / "suwayomi_smoke.py")
+        smoke = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke)
+        replies = [
+            {"data": {"settings": {"jwtTokenExpiry": "1s"}}},
+            {"data": {"login": {"accessToken": "expired-access", "refreshToken": "test-refresh"}}},
+            {"errors": [{"message": "Expired"}]},
+            {"data": {"settings": {"jwtTokenExpiry": "5m"}}},
+            {"data": {"refreshToken": {"accessToken": "renewed-access"}}},
+            {"data": {"user": {"id": 1}}},
+        ]
+        with patch.object(smoke, "graphql", side_effect=replies) as api, patch.object(
+            smoke, "request", return_value=(401, b"")
+        ) as media, patch.object(smoke, "wait_for_token_expiry") as expiry:
+            result = smoke.verify_native_token_expiry("http://test", "login", options(), "admin-access", "/api/image")
+        self.assertEqual(result["accessToken"], "expired-access")
+        expiry.assert_called_once_with("expired-access")
+        media.assert_called_once_with("http://test/api/image", "expired-access")
+        calls = api.call_args_list
+        self.assertIn('jwtTokenExpiry:"1s"', calls[0].args[1])
+        self.assertEqual(calls[2].kwargs["token"], "expired-access")
+        self.assertIn('jwtTokenExpiry:"5m"', calls[3].args[1])
+        self.assertEqual(calls[4].kwargs["token"], "expired-access")
+        self.assertEqual(calls[5].kwargs["token"], "renewed-access")
+
+    def test_expiry_wait_uses_jwt_claims_and_a_monotonic_deadline(self):
+        smoke_spec = importlib.util.spec_from_file_location("suwayomi_expiry_clock", ROOT / "tests" / "suwayomi_smoke.py")
+        smoke = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke)
+        def token(expiry):
+            claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+            return "header." + claims + ".signature"
+        with patch.object(smoke.time, "time", side_effect=[100, 100, 100, 101.1]), patch.object(
+            smoke.time, "monotonic", return_value=0
+        ), patch.object(smoke.time, "sleep") as sleep:
+            smoke.wait_for_token_expiry(token(101))
+        sleep.assert_called_once()
+        with patch.object(smoke.time, "time", return_value=100), patch.object(
+            smoke.time, "monotonic", side_effect=[0, 8]
+        ), patch.object(smoke.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "bounded test deadline"):
+                smoke.wait_for_token_expiry(token(101))
+        for value in ("private-invalid-token", token(True), token(0), token(300)):
+            with self.subTest(token=value), patch.object(smoke.time, "time", return_value=100):
+                with self.assertRaises(RuntimeError) as error:
+                    smoke.wait_for_token_expiry(value)
+                self.assertNotIn(value, str(error.exception))
+        with patch.object(smoke.time, "time", return_value=200):
+            smoke.wait_for_token_expiry(token(101))
+
+    def test_smoke_failure_diagnostics_redact_credentials_and_escaped_passwords(self):
+        smoke_spec = importlib.util.spec_from_file_location("suwayomi_safe_logs", ROOT / "tests" / "suwayomi_smoke.py")
+        smoke = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke)
+        password = 'private "password" with \\ escapes'
+        smoke.remember_secrets({"password": password, "data": {"login": {"accessToken": "private-access"}}})
+        text = "startup failure " + password + " " + json.dumps(password)[1:-1] + " private-access"
+        with patch.object(smoke, "docker", return_value=text), patch("sys.stdout", new_callable=io.StringIO) as output:
+            smoke.print_failure_logs("fixture", "80")
+        self.assertIn("startup failure", output.getvalue())
+        self.assertNotIn("private", output.getvalue())
+        with patch.object(smoke.subprocess, "check_output", side_effect=subprocess.CalledProcessError(
+            1, ["docker", "exec", "--env", "TOKEN=private-access"], output="private-access"
+        )):
+            with self.assertRaisesRegex(RuntimeError, "exit code 1") as error:
+                smoke.docker("exec", "--env", "TOKEN=private-access")
+        self.assertNotIn("private-access", str(error.exception))
+        with patch.object(smoke.subprocess, "check_output", side_effect=subprocess.TimeoutExpired(
+            ["docker", "exec", "--env", "TOKEN=private-access"], 180,
+        )) as output:
+            with self.assertRaisesRegex(RuntimeError, "180-second deadline") as error:
+                smoke.docker("exec", "--env", "TOKEN=private-access")
+        self.assertEqual(output.call_args.kwargs["timeout"], 180)
+        self.assertNotIn("private-access", str(error.exception))
+
+    def test_smoke_cleanup_attempts_all_resources_and_preserves_primary_failure(self):
+        smoke_spec = importlib.util.spec_from_file_location("suwayomi_cleanup", ROOT / "tests" / "suwayomi_smoke.py")
+        smoke = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke)
+        resources = [("container", "app"), ("network", "network"), ("volume", "data")]
+        responses = [subprocess.TimeoutExpired("docker", 90),
+                     subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)]
+        with patch.object(smoke.subprocess, "run", side_effect=responses) as run, patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as output:
+            smoke.cleanup_resources(resources, primary_failure=True)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn("Additional cleanup failures", output.getvalue())
+        with patch.object(smoke.subprocess, "run", side_effect=responses) as run:
+            with self.assertRaisesRegex(RuntimeError, "cleanup"):
+                smoke.cleanup_resources(resources, primary_failure=False)
+        self.assertEqual(run.call_count, 3)
+
     def test_native_login_is_bounded_and_cannot_be_overridden(self):
         settings = runner.build_settings(options(), SUPPORTED)
         self.assertEqual(settings["authMode"], "UI_LOGIN")
