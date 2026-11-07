@@ -75,6 +75,10 @@ failures, other network errors, HTTP failures and asset/JavaScript failures stil
 fail the gate. Run its focused Chromium regression tests with
 `node --test tests/browser_ready.test.mjs` after installing the locked test
 dependencies and Playwright Chromium.
+The native JWT expiry smoke test expires a one-second fixture token, verifies
+that it cannot access user/media data, then restores the normal five-minute
+setting before refreshing that expired token. This keeps replacement tokens
+usable on slower runners without weakening expiry or refresh authentication.
 
 The GitHub pipeline checks upstream master and compatible WebUI releases on
 pushes and daily at **04:15 UTC**. When either changes, the pipeline increments

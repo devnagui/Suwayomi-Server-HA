@@ -85,6 +85,27 @@ def certificate_peer(port: int, ca: Path) -> bytes:
             return secured.getpeercert(binary_form=True)
 
 
+def verify_native_token_expiry(direct_url: str, login_query: str, options: dict,
+                               authorization: str, media_path: str) -> dict:
+    expiry_setting = graphql(direct_url,
+        'mutation{setSettings(input:{settings:{jwtTokenExpiry:"1s"}}){settings{jwtTokenExpiry}}}', token=authorization)
+    assert "errors" not in expiry_setting, "Could not configure the disposable fixture's short native token"
+    expiring = graphql(direct_url, login_query,
+        {"input":{"username":options["auth_username"],"password":options["auth_password"]}})["data"]["login"]
+    time.sleep(2)
+    assert "errors" in graphql(direct_url, "{user{id}}", token=expiring["accessToken"]), "Expired native JWT remained authenticated"
+    assert request(direct_url + media_path, expiring["accessToken"])[0] == 401, "Expired native JWT accessed media"
+    # Keep the old token expired, but give its replacement enough lifetime for slow runners.
+    assert "errors" not in graphql(direct_url,
+        'mutation{setSettings(input:{settings:{jwtTokenExpiry:"5m"}}){settings{jwtTokenExpiry}}}', token=authorization)
+    refreshed = graphql(direct_url, "mutation($input:RefreshTokenInput!){refreshToken(input:$input){accessToken}}",
+        {"input":{"refreshToken":expiring["refreshToken"]}}, token=expiring["accessToken"])
+    assert "errors" not in refreshed, "Native direct client could not refresh an expired access token"
+    identity = graphql(direct_url, "{user{id}}", token=refreshed["data"]["refreshToken"]["accessToken"])
+    assert identity == {"data": {"user": {"id": 1}}}, "Refreshed native token did not restore administrator identity"
+    return expiring
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("image")
@@ -384,19 +405,7 @@ def main() -> None:
                     ["node", str(ROOT / "tests" / "suwayomi_browser.mjs"), ingress_url, direct_url + "/"],
                     env=environment, check=True,
                 )
-            expiry_setting = graphql(direct_url,
-                'mutation{setSettings(input:{settings:{jwtTokenExpiry:"1s"}}){settings{jwtTokenExpiry}}}', token=authorization)
-            assert "errors" not in expiry_setting, "Could not configure the disposable fixture's short native token"
-            expiring = graphql(direct_url, login_query, {"input":{"username":options["auth_username"],"password":options["auth_password"]}})["data"]["login"]
-            time.sleep(2)
-            assert "errors" in graphql(direct_url, "{user{id}}", token=expiring["accessToken"]), "Expired native JWT remained authenticated"
-            assert request(direct_url + manga["thumbnailUrl"], expiring["accessToken"])[0] == 401, "Expired native JWT accessed media"
-            refreshed = graphql(direct_url, "mutation($input:RefreshTokenInput!){refreshToken(input:$input){accessToken}}",
-                {"input":{"refreshToken":expiring["refreshToken"]}}, token=expiring["accessToken"])
-            assert "errors" not in refreshed, "Native direct client could not refresh an expired access token"
-            assert graphql(direct_url, "{user{id}}", token=refreshed["data"]["refreshToken"]["accessToken"])["data"]["user"]["id"] == 1
-            assert "errors" not in graphql(direct_url,
-                'mutation{setSettings(input:{settings:{jwtTokenExpiry:"5m"}}){settings{jwtTokenExpiry}}}', token=authorization)
+            expiring = verify_native_token_expiry(direct_url, login_query, options, authorization, manga["thumbnailUrl"])
             print("PASS: actual native access-token expiry rejects direct library/media; refresh accepts expired Bearer Authorization and restores administrator identity", flush=True)
             marker = storage + "/ha-persistence-check"
             docker("exec", "--user", "1001", app, "python3", "-c", f"from pathlib import Path; Path({marker!r}).write_text('preserved')")

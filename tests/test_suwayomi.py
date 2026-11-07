@@ -40,6 +40,32 @@ def options():
 
 
 class SuwayomiTests(unittest.TestCase):
+    def test_expiry_smoke_restores_normal_lifetime_before_refresh_on_slow_runners(self):
+        smoke_spec = importlib.util.spec_from_file_location("suwayomi_expiry_smoke", ROOT / "tests" / "suwayomi_smoke.py")
+        smoke = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke)
+        replies = [
+            {"data": {"settings": {"jwtTokenExpiry": "1s"}}},
+            {"data": {"login": {"accessToken": "expired-access", "refreshToken": "test-refresh"}}},
+            {"errors": [{"message": "Expired"}]},
+            {"data": {"settings": {"jwtTokenExpiry": "5m"}}},
+            {"data": {"refreshToken": {"accessToken": "renewed-access"}}},
+            {"data": {"user": {"id": 1}}},
+        ]
+        with patch.object(smoke, "graphql", side_effect=replies) as api, patch.object(
+            smoke, "request", return_value=(401, b"")
+        ) as media, patch.object(smoke.time, "sleep") as sleep:
+            result = smoke.verify_native_token_expiry("http://test", "login", options(), "admin-access", "/api/image")
+        self.assertEqual(result["accessToken"], "expired-access")
+        sleep.assert_called_once_with(2)
+        media.assert_called_once_with("http://test/api/image", "expired-access")
+        calls = api.call_args_list
+        self.assertIn('jwtTokenExpiry:"1s"', calls[0].args[1])
+        self.assertEqual(calls[2].kwargs["token"], "expired-access")
+        self.assertIn('jwtTokenExpiry:"5m"', calls[3].args[1])
+        self.assertEqual(calls[4].kwargs["token"], "expired-access")
+        self.assertEqual(calls[5].kwargs["token"], "renewed-access")
+
     def test_native_login_is_bounded_and_cannot_be_overridden(self):
         settings = runner.build_settings(options(), SUPPORTED)
         self.assertEqual(settings["authMode"], "UI_LOGIN")
