@@ -70,15 +70,53 @@ commit alone means the images are available.
 
 The browser release gate attributes same-origin GraphQL POST cancellations to
 explicit test navigation, including the service-worker reload after subscription
-checks. Only `net::ERR_ABORTED` during those navigations is expected; idle API
+checks. Only `net::ERR_ABORTED` from requests belonging to the previous document
+during those navigations is expected; new-document failures, idle API
 failures, other network errors, HTTP failures and asset/JavaScript failures still
-fail the gate. Run its focused Chromium regression tests with
+fail the gate. Readiness is based on visible app content and settled app-owned
+assets, not global network idleness: background GraphQL activity must not prevent
+an otherwise ready page or iframe from being tested. Run the Chromium regressions with
 `node --test tests/browser_ready.test.mjs` after installing the locked test
 dependencies and Playwright Chromium.
 The native JWT expiry smoke test expires a one-second fixture token, verifies
 that it cannot access user/media data, then restores the normal five-minute
 setting before refreshing that expired token. This keeps replacement tokens
 usable on slower runners without weakening expiry or refresh authentication.
+Expiry waiting uses the issued token's expiry claim and a bounded monotonic
+deadline rather than a fixed sleep. Docker operations, browser smoke subprocesses
+and cleanup have deadlines. Failure logs redact fixture credentials/JWTs;
+cleanup attempts every created resource without replacing the original failure.
+Metadata GETs have up to three bounded attempts for transport failures or
+HTTP 408/429/5xx; authentication failures, invalid JSON, mismatched release tags
+and compatibility errors remain immediate failures. `git ls-remote` has a
+thirty-second deadline. The Gradle build gets at most three attempts only when
+its output identifies a dependency-download transport failure such as HTTP 504;
+compilation, tests, integrity, authentication and TLS failures are not retried.
+Each Gradle attempt is limited to eight minutes, with short two/four-second
+delays between retries; a timed-out process fails instead of being retried.
+
+Prepare/build/publication jobs are limited to ten/forty/fifteen minutes.
+Superseded PR runs can still be cancelled, but main/release runs are not cancelled
+mid-publication by a newer push or schedule. Both architecture gates must pass
+before release metadata is committed. Registry writes for the two architecture
+tags are still sequential, not an atomic transaction; a failed promotion remains
+a failed release and needs inspection, never a successful fallback.
+
+### Why a run can still fail
+
+The November 2026 failures had different causes: cancelled browser requests were
+mistaken for errors, a refreshed one-second test JWT could expire on ARM64, and
+an upstream Gradle dependency download returned HTTP 504. Old failure
+notifications also remain visible after a later commit passes; compare the
+notification's commit with the PR's latest completed checks.
+
+Reliability changes must not turn errors into passes. Invalid metadata, broken
+patches, compilation/test failures, bad authentication, changed checksums and
+incompatible stable/preview WebUIs must still block publication. Upstream APIs,
+dependency repositories and runtime WebUI channels are external dependencies,
+so no workflow can guarantee every future run will succeed. The goal is bounded,
+reproducible checks and diagnostics that distinguish a real regression from a
+transient download failure, not retries of whole failed builds or skipped gates.
 
 The GitHub pipeline checks upstream master and compatible WebUI releases on
 pushes and daily at **04:15 UTC**. When either changes, the pipeline increments

@@ -1,9 +1,14 @@
 export function trackAppNavigation(page, base) {
     const abortedRequests = new WeakSet();
+    const activeRequests = new Set();
+    let previousDocumentRequests = new Set();
     let navigating = false;
+    page.on('request', request => activeRequests.add(request));
+    page.on('requestfinished', request => activeRequests.delete(request));
     page.on('requestfailed', request => {
+        activeRequests.delete(request);
         const url = new URL(request.url());
-        if (navigating && url.origin === base.origin &&
+        if (navigating && previousDocumentRequests.has(request) && url.origin === base.origin &&
             url.pathname === base.pathname + 'api/graphql' &&
             request.method() === 'POST' &&
             request.failure()?.errorText === 'net::ERR_ABORTED') {
@@ -12,18 +17,20 @@ export function trackAppNavigation(page, base) {
     });
     return {
         isNavigationAbort: request => abortedRequests.has(request),
-        async goto(address, options = { waitUntil: 'networkidle' }) {
+        async goto(address, options = { waitUntil: 'domcontentloaded' }) {
+            previousDocumentRequests = new Set(activeRequests);
             navigating = true;
             try {
                 return await page.goto(address, options);
             } finally {
                 navigating = false;
+                previousDocumentRequests.clear();
             }
         },
     };
 }
 
-export function trackAppAssets(page, base) {
+export function trackAppAssets(page, base, ready = page.locator('#root svg:visible').first()) {
     const pending = new Set();
     const listeners = new Set();
     const notify = () => listeners.forEach(listener => listener());
@@ -40,7 +47,7 @@ export function trackAppAssets(page, base) {
     page.on('requestfinished', finished);
     page.on('requestfailed', finished);
     return async () => {
-        await page.locator('#root svg:visible').first().waitFor({ state: 'visible' });
+        await ready.waitFor({ state: 'visible' });
         // SPA redirects can retain an old networkidle load state while importing assets.
         await new Promise((resolve, reject) => {
             let idle;

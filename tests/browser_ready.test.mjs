@@ -26,6 +26,7 @@ test('only navigation-cancelled same-origin GraphQL POSTs are classified as expe
         request(new URL('api/graphql', base).href, 'POST', 'net::ERR_CONNECTION_RESET'),
     ];
     const navigation = trackAppNavigation(page, base);
+    for (const request of requests) listeners.get('request')(request);
     assert.equal(await navigation.goto(base.href), 'navigated');
     assert.deepEqual(requests.map(navigation.isNavigationAbort), [true, false, false, false, false]);
     const idleFailure = request(new URL('api/graphql', base).href);
@@ -36,6 +37,14 @@ test('only navigation-cancelled same-origin GraphQL POSTs are classified as expe
     const failureAfterNavigation = request(new URL('api/graphql', base).href);
     listeners.get('requestfailed')(failureAfterNavigation);
     assert.equal(navigation.isNavigationAbort(failureAfterNavigation), false);
+    const newDocumentFailure = request(new URL('api/graphql', base).href);
+    page.goto = async () => {
+        listeners.get('request')(newDocumentFailure);
+        listeners.get('requestfailed')(newDocumentFailure);
+    };
+    await navigation.goto(base.href);
+    assert.equal(navigation.isNavigationAbort(newDocumentFailure), false,
+        'A new document failure must not be mistaken for a cancelled old request');
 });
 
 test('reload cancels background GraphQL without hiding assets or idle request failures', async () => {
@@ -140,6 +149,7 @@ test('asset settling does not hide genuine HTTP or JavaScript failures', async (
         response.end(`<div id="root"><svg width="20" height="20"></svg></div>
             <script type="module">import('/assets/missing.js');</script>`);
     });
+
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     let browser;
@@ -159,6 +169,39 @@ test('asset settling does not hide genuine HTTP or JavaScript failures', async (
         assert.ok(errors.some(message => message.includes('dynamically imported module')));
     } finally {
         await browser?.close();
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('app readiness is independent of background GraphQL network idleness', async () => {
+    const pendingResponses = new Set();
+    const server = createServer((request, response) => {
+        if (request.url === '/api/graphql') {
+            pendingResponses.add(response);
+            response.on('close', () => pendingResponses.delete(response));
+            return;
+        }
+        response.writeHead(200, { 'Content-Type': 'text/html' });
+        response.end('<div id="root"><svg width="20" height="20"></svg></div><script>fetch("/api/graphql", {method:"POST"}).catch(() => {});</script>');
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        const base = new URL(`http://127.0.0.1:${server.address().port}/`);
+        const waitForAppReady = trackAppAssets(page, base);
+        const navigation = trackAppNavigation(page, base);
+        const started = page.waitForRequest('**/api/graphql');
+        await navigation.goto(base.href);
+        await started;
+        await assert.rejects(page.waitForLoadState('networkidle', { timeout: 200 }), /Timeout/);
+        await waitForAppReady();
+        assert.equal(pendingResponses.size, 1, 'Fixture must retain actual background API activity');
+    } finally {
+        await browser?.close();
+        for (const response of pendingResponses) response.destroy();
         await new Promise(resolve => server.close(resolve));
     }
 });

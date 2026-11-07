@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { githubJson } = require('./github-metadata.cjs');
 
 const defaultApp = path.resolve(__dirname, '..', 'suwayomi');
 
@@ -54,19 +55,6 @@ function pin(version, revision, app = defaultApp, webui) {
     console.log(`Pinned main Suwayomi server ${revision} as HA app ${version}. Commit/push the app-owned files to build and publish.`);
 }
 
-async function githubJson(url, fetcher = fetch) {
-    const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-    const response = await fetcher(url, {
-        headers: {
-            Accept: 'application/vnd.github+json',
-            ...(token && new URL(url).hostname === 'api.github.com' ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        signal: AbortSignal.timeout(20000),
-    });
-    if (!response.ok) throw new Error(`Upstream metadata request failed with HTTP ${response.status}`);
-    return { data: await response.json(), headers: response.headers };
-}
-
 async function compatibleWebUI(serverVersion, fetcher = fetch) {
     const mappingResponse = await githubJson(
         'https://raw.githubusercontent.com/Suwayomi/Suwayomi-WebUI/master/versionToServerVersionMapping.json', fetcher,
@@ -116,18 +104,31 @@ async function update(version, serverPath = path.resolve(__dirname, '..', '..', 
     pin(version, git('rev-parse', 'HEAD'), app, webui);
 }
 
+function latestRevision(runner = execFileSync) {
+    let remote;
+    try {
+        remote = runner('git', [
+            'ls-remote', 'https://github.com/Suwayomi/Suwayomi-Server.git', 'refs/heads/master',
+        ], { encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL' }).trim();
+    } catch (error) {
+        if (error.code === 'ETIMEDOUT') {
+            throw new Error('Upstream git ls-remote timed out after 30 seconds; package files were not changed', { cause: error });
+        }
+        throw error;
+    }
+    const revision = /^([0-9a-f]{40})\s+refs\/heads\/master$/.exec(remote);
+    if (!revision) throw new Error('Cannot resolve upstream master; package files were not changed');
+    return revision[1];
+}
+
 async function latest(app = defaultApp, fetcher = fetch) {
     const current = /^version: "(\d+\.\d+\.\d+)"$/m.exec(fs.readFileSync(path.join(app, 'config.yaml'), 'utf8'));
     const previous = /SOURCE_REF: "([0-9a-f]{40})"/.exec(fs.readFileSync(path.join(app, 'build.yaml'), 'utf8'));
     if (!current || !previous) throw new Error('Cannot resolve the current app source/version pins');
-    const remote = execFileSync('git', [
-        'ls-remote', 'https://github.com/Suwayomi/Suwayomi-Server.git', 'refs/heads/master',
-    ], { encoding: 'utf8' }).trim();
-    const revision = /^([0-9a-f]{40})\s+refs\/heads\/master$/.exec(remote);
-    if (!revision) throw new Error('Cannot resolve upstream master; package files were not changed');
-    const webui = await compatibleWebUI(await serverCommitCount(revision[1], fetcher), fetcher);
+    const revision = latestRevision();
+    const webui = await compatibleWebUI(await serverCommitCount(revision, fetcher), fetcher);
     const previousWebUI = currentWebUI(app);
-    if (revision[1] === previous[1] && JSON.stringify(webui) === JSON.stringify(previousWebUI)) {
+    if (revision === previous[1] && JSON.stringify(webui) === JSON.stringify(previousWebUI)) {
         console.log('Upstream server and compatible WebUI are unchanged; no version bump is needed.');
         return false;
     }
@@ -139,9 +140,9 @@ async function latest(app = defaultApp, fetcher = fetch) {
     if (!/^# Changelog\r?\n/.test(changelog)) throw new Error('Changelog format changed; package files were not updated');
     const updatedChangelog = changelog.replace(
         /^# Changelog\r?\n/,
-        `# Changelog\n\n## ${version}\n\n- Automatically repackage [upstream Suwayomi server ${revision[1].slice(0, 12)}](https://github.com/Suwayomi/Suwayomi-Server/commit/${revision[1]}) with verified compatible WebUI ${webui.revision}.\n- Publish only after amd64 and ARM64 build, ingress/API/browser and USB library-persistence tests pass.\n`,
+        `# Changelog\n\n## ${version}\n\n- Automatically repackage [upstream Suwayomi server ${revision.slice(0, 12)}](https://github.com/Suwayomi/Suwayomi-Server/commit/${revision}) with verified compatible WebUI ${webui.revision}.\n- Publish only after amd64 and ARM64 build, ingress/API/browser and USB library-persistence tests pass.\n`,
     );
-    pin(version, revision[1], app, webui);
+    pin(version, revision, app, webui);
     fs.writeFileSync(changelogPath, updatedChangelog.replace(/\r\n/g, '\n'), 'utf8');
     return true;
 }
@@ -158,4 +159,4 @@ if (require.main === module) {
         process.exitCode = 1;
     } })();
 }
-module.exports = { update, pin, latest, compatibleWebUI, serverCommitCount };
+module.exports = { update, pin, latest, latestRevision, compatibleWebUI, serverCommitCount };

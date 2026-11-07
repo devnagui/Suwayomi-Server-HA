@@ -174,8 +174,9 @@ try {
                 const url = new URL(response.url());
                 if (url.origin === base.origin && response.status() >= 400) errors.push(`Iframe HTTP ${response.status()} ${url.pathname}`);
             });
-            await host.goto(base.origin + '/', { waitUntil: 'networkidle' });
             const iframe = host.frameLocator('iframe');
+            const waitForIframeReady = trackAppAssets(host, base, iframe.locator('#root svg:visible').first());
+            await host.goto(base.origin + '/', { waitUntil: 'domcontentloaded' });
             await iframe.locator('#root svg:visible').first().waitFor({ state: 'visible' });
             assert.equal(await iframe.getByLabel(/^Username$/i).count(), 0, 'HA iframe requested a second login');
             assert.equal(await iframe.locator('base').getAttribute('href'), base.pathname);
@@ -184,7 +185,7 @@ try {
                 return { fontFamily: computed.fontFamily, backgroundColor: computed.backgroundColor };
             });
             assert.ok(style.fontFamily && style.backgroundColor, 'Iframe styles did not load');
-            await host.waitForLoadState('networkidle');
+            await waitForIframeReady();
             await host.close();
         }
         assert.deepEqual(errors, [], 'Browser, iframe or asset failures');
