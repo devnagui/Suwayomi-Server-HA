@@ -81,6 +81,11 @@ to their navigation, and the browser must actually render the seeded library
 manga instead of merely showing a page shell. Run the Chromium regressions with
 `node --test tests/browser_ready.test.mjs` after installing the locked test
 dependencies and Playwright Chromium.
+Newer Apollo-based preview UIs also cancel redundant queries during initialization.
+A cancelled query is accepted only when an identical query and variables in the
+same document delivered HTTP 200 with actual data and no GraphQL errors.
+Unmatched cancellations, mutations, failed responses and responses from another
+document still fail; API cancellation is not blanket-ignored.
 The native JWT expiry smoke test expires a one-second fixture token, verifies
 that it cannot access user/media data, then restores the normal five-minute
 setting before refreshing that expired token. This keeps replacement tokens

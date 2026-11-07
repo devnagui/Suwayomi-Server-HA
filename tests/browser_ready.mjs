@@ -1,3 +1,59 @@
+import { createHash } from 'node:crypto';
+
+export function trackQueryReplacements(page, base, documentId) {
+    const requests = new WeakMap();
+    const responses = [];
+    page.on('request', request => {
+        const url = new URL(request.url());
+        if (url.origin !== base.origin || url.pathname !== base.pathname + 'api/graphql' ||
+            request.method() !== 'POST') return;
+        let body;
+        try {
+            body = JSON.parse(request.postData() || '{}');
+        } catch {
+            return;
+        }
+        if (typeof body.query !== 'string' || !/^\s*(?:query\b|\{)/.test(body.query)) return;
+        const signature = createHash('sha256').update(JSON.stringify({
+            query: body.query, variables: body.variables || {},
+        })).digest('hex');
+        requests.set(request, { signature, document: documentId() });
+    });
+    page.on('requestfailed', request => {
+        const tracked = requests.get(request);
+        if (tracked) tracked.aborted = true;
+    });
+    page.on('response', response => {
+        const tracked = requests.get(response.request());
+        if (tracked && response.status() === 200) {
+            responses.push({ ...tracked, response });
+        }
+    });
+    return async request => {
+        const aborted = requests.get(request);
+        if (!aborted?.aborted || request.failure()?.errorText !== 'net::ERR_ABORTED') return false;
+        for (const replacement of responses) {
+            if (replacement.document !== aborted.document || replacement.signature !== aborted.signature) continue;
+            let result;
+            let timeout;
+            try {
+                result = await Promise.race([
+                    replacement.response.json(),
+                    new Promise((_, reject) => {
+                        timeout = setTimeout(() => reject(new Error('Query response body did not complete')), 5000);
+                    }),
+                ]);
+            } catch {
+                continue;
+            } finally {
+                clearTimeout(timeout);
+            }
+            if (result?.data && typeof result.data === 'object' && Object.keys(result.data).length && !result.errors) return true;
+        }
+        return false;
+    };
+}
+
 export function trackAppNavigation(page, base) {
     const abortedRequests = new WeakSet();
     const activeRequests = new Set();
@@ -5,6 +61,7 @@ export function trackAppNavigation(page, base) {
     let navigationCommitted = false;
     let navigationRequests = new Set();
     let navigating = false;
+    let document = 0;
     page.on('request', request => {
         activeRequests.add(request);
         if (navigating && !navigationCommitted) {
@@ -32,7 +89,9 @@ export function trackAppNavigation(page, base) {
     });
     return {
         isNavigationAbort: request => abortedRequests.has(request),
+        documentId: () => document,
         async goto(address, options = { waitUntil: 'domcontentloaded' }) {
+            document += 1;
             navigationRequests = new Set(activeRequests);
             for (const request of navigationRequests) previousDocumentRequests.add(request);
             navigationCommitted = false;

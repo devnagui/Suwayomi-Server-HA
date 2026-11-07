@@ -1,9 +1,54 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { test } from 'node:test';
 import { chromium } from 'playwright';
-import { trackAppAssets, trackAppNavigation } from './browser_ready.mjs';
+import { trackAppAssets, trackAppNavigation, trackQueryReplacements } from './browser_ready.mjs';
+
+test('a cancelled duplicate query requires successful identical data in the same document', async () => {
+    const page = new EventEmitter();
+    page.mainFrame = () => 'main-frame';
+    const base = new URL('http://localhost/api/hassio_ingress/test/');
+    let document = 0;
+    const query = (operation = '{ user { id } }', variables = {}) => ({
+        url: () => new URL('api/graphql', base).href,
+        method: () => 'POST', postData: () => JSON.stringify({ query: operation, variables }),
+        failure: () => ({ errorText: 'net::ERR_ABORTED' }),
+    });
+    const satisfied = trackQueryReplacements(page, base, () => document);
+    const cancelled = query();
+    page.emit('request', cancelled);
+    page.emit('requestfailed', cancelled);
+    assert.equal(await satisfied(cancelled), false, 'An unmatched idle cancellation must fail');
+    const replacement = query();
+    page.emit('request', replacement);
+    page.emit('response', {
+        request: () => replacement, status: () => 200,
+        json: async () => ({ errors: [{ message: 'Unauthorized' }] }),
+    });
+    assert.equal(await satisfied(cancelled), false, 'HTTP 200 with GraphQL errors is not success');
+    const different = query('{ settings { authMode } }');
+    page.emit('request', different);
+    page.emit('response', { request: () => different, status: () => 200, json: async () => ({ data: { settings: {} } }) });
+    assert.equal(await satisfied(cancelled), false, 'An unrelated query must not excuse cancellation');
+    page.emit('response', { request: () => replacement, status: () => 200, json: async () => ({ data: { user: { id: 1 } } }) });
+    assert.equal(await satisfied(cancelled), true);
+    const duplicate = query();
+    page.emit('request', duplicate);
+    page.emit('requestfailed', duplicate);
+    assert.equal(await satisfied(duplicate), true, 'Previously delivered identical data can satisfy a redundant query');
+    page.emit('framenavigated', page.mainFrame());
+    assert.equal(await satisfied(duplicate), true, 'SPA history changes must not discard valid same-document data');
+    const mutation = query('mutation { changeSomething { id } }');
+    page.emit('request', mutation);
+    page.emit('requestfailed', mutation);
+    assert.equal(await satisfied(mutation), false, 'Mutations must not be waived as redundant queries');
+    document += 1;
+    const nextDocument = query();
+    page.emit('request', nextDocument);
+    page.emit('requestfailed', nextDocument);
+    assert.equal(await satisfied(nextDocument), false, 'A previous document response must not satisfy a new document query');
+});
 
 test('only navigation-cancelled same-origin GraphQL POSTs are classified as expected', async () => {
     const listeners = new Map();
@@ -244,6 +289,56 @@ test('thumbnail blob fetches settle before navigating away', async () => {
         assert.equal(await page.evaluate(() => globalThis.thumbnailLoaded), true);
     } finally {
         await browser?.close();
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('a real client-cancelled query is accepted only after identical successful data', async () => {
+    const pendingResponses = new Set();
+    let calls = 0;
+    const server = createServer((request, response) => {
+        if (request.url === '/api/graphql') {
+            calls += 1;
+            if (calls === 1) {
+                pendingResponses.add(response);
+                response.on('close', () => pendingResponses.delete(response));
+                return;
+            }
+            response.writeHead(200, { 'Content-Type': 'application/json' });
+            response.end('{"data":{"user":{"id":1}}}');
+            return;
+        }
+        response.writeHead(200, { 'Content-Type': 'text/html' });
+        response.end('<div id="root"><svg width="20" height="20"></svg></div>');
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        const base = new URL(`http://127.0.0.1:${server.address().port}/`);
+        const navigation = trackAppNavigation(page, base);
+        const satisfied = trackQueryReplacements(page, base, navigation.documentId);
+        await navigation.goto(base.href);
+        const started = page.waitForRequest('**/api/graphql');
+        await page.evaluate(() => {
+            globalThis.controller = new AbortController();
+            fetch('/api/graphql', { method: 'POST', body: '{"query":"{ user { id } }"}', signal: controller.signal }).catch(() => {});
+        });
+        await started;
+        const failed = page.waitForEvent('requestfailed');
+        await page.evaluate(() => controller.abort());
+        const aborted = await failed;
+        assert.equal(await satisfied(aborted), false);
+        await page.evaluate(async () => {
+            const response = await fetch('/api/graphql', { method: 'POST', body: '{"query":"{ user { id } }"}' });
+            return response.json();
+        });
+        assert.equal(await satisfied(aborted), true);
+    } finally {
+        await browser?.close();
+        for (const response of pendingResponses) response.destroy();
         await new Promise(resolve => server.close(resolve));
     }
 });

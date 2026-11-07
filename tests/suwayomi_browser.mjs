@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { trackAppAssets, trackAppNavigation } from './browser_ready.mjs';
+import { trackAppAssets, trackAppNavigation, trackQueryReplacements } from './browser_ready.mjs';
 
 const browser = await chromium.launch({ headless: true });
 const expectAuthFailure = process.argv.includes('--expect-ingress-auth-failure');
@@ -12,6 +12,7 @@ try {
         });
         const page = await context.newPage();
         const navigation = trackAppNavigation(page, base);
+        const isReplacedQuery = trackQueryReplacements(page, base, navigation.documentId);
         const waitForAppReady = trackAppAssets(page, base);
         assert.equal(await page.evaluate(() => navigator.language), 'en-US');
         if (expectAuthFailure) {
@@ -62,6 +63,19 @@ try {
         const externalFonts = new Set();
         const assets = new Set();
         const nativeRefreshes = [];
+        const cancelledQueries = [];
+        const assertNoBrowserErrors = async message => {
+            for (const request of cancelledQueries.splice(0)) {
+                if (!await isReplacedQuery(request)) {
+                    const url = new URL(request.url());
+                    const body = request.postData() || '';
+                    const operation = /"operationName"\s*:\s*"([A-Za-z_][A-Za-z_0-9]*)"/.exec(body)?.[1] ||
+                        /\b(?:query|mutation)\s+([A-Za-z_][A-Za-z_0-9]*)/.exec(body)?.[1] || 'unnamed';
+                    errors.push(`${url.hostname}${url.pathname} (${operation}): ${request.failure()?.errorText}`);
+                }
+            }
+            assert.deepEqual(errors, [], message);
+        };
         page.on('pageerror', error => errors.push(error.message));
         page.on('console', message => {
             if (message.type() === 'error') consoleErrors.push(message.text());
@@ -73,6 +87,11 @@ try {
         page.on('requestfailed', request => {
             const url = new URL(request.url());
             if (navigation.isNavigationAbort(request)) return;
+            if (url.origin === base.origin && url.pathname === base.pathname + 'api/graphql' &&
+                request.method() === 'POST' && request.failure()?.errorText === 'net::ERR_ABORTED') {
+                cancelledQueries.push(request);
+                return;
+            }
             if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
                 externalFonts.add(`${url.hostname}: ${request.failure()?.errorText}`);
             } else {
@@ -133,7 +152,7 @@ try {
         assert.ok(assets.size >= 10, 'Too few real browser assets were exercised');
         assert.ok(nativeRefreshes.length >= 6, 'Native WebUI did not refresh its session on route reloads');
         session.accessToken = nativeRefreshes.at(-1);
-        assert.deepEqual(errors, [], 'Browser, HTTP or asset failures');
+        await assertNoBrowserErrors('Browser, HTTP or asset failures');
         const subscribe = token => page.evaluate(token => new Promise((resolve, reject) => {
             const endpoint = new URL('api/graphql', document.baseURI);
             endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -199,7 +218,7 @@ try {
             await waitForIframeReady();
             await host.close();
         }
-        assert.deepEqual(errors, [], 'Browser, iframe or asset failures');
+        await assertNoBrowserErrors('Browser, iframe or asset failures');
         const refreshes = await page.evaluate(() => Object.keys(localStorage).filter(key => key.includes('auth-refresh-token')));
         assert.equal(refreshes.length, 1, 'Native UI did not persist its scoped refresh session');
         if (index === 0) {
