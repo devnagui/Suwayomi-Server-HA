@@ -1,6 +1,6 @@
 name: "Suwayomi Server"
 description: "Unofficial Suwayomi Server repackaging for Home Assistant, with ingress and configurable storage"
-version: "0.1.9"
+version: "0.1.10"
 slug: "suwayomi"
 url: "https://github.com/devnagui/Suwayomi-Server-HA"
 arch:
@@ -10,7 +10,7 @@ image: "ghcr.io/devnagui/suwayomi-server-ha/suwayomi-{arch}"
 init: false
 boot: manual
 backup: cold
-timeout: 120
+timeout: 300
 ingress: true
 ingress_port: 8080
 ingress_stream: true
