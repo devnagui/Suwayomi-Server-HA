@@ -12,6 +12,10 @@ on:
         description: Check upstream server and compatible WebUI releases, then bump the HA patch version if either changes
         type: boolean
         default: true
+      release_version:
+        description: Optional newer HA version for packaging-only changes; requires update_upstream=false and retains current server/WebUI pins
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -47,6 +51,24 @@ jobs:
       - name: Verify selective Gradle download retries
         run: python scripts/test_gradle_retry.py
       - run: pip install -r tests/requirements-suwayomi.txt
+      - name: Prepare an explicit packaging-only release without changing upstream pins
+        if: github.event_name == 'workflow_dispatch' && inputs.release_version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          UPDATE_UPSTREAM: ${{ inputs.update_upstream }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, yaml
+          from pathlib import Path
+          if os.environ["UPDATE_UPSTREAM"] != "false":
+              raise SystemExit("release_version requires update_upstream=false")
+          source = yaml.safe_load(Path("suwayomi/build.yaml").read_text())["args"]["SOURCE_REF"]
+          subprocess.run([
+              "node", "-e",
+              "require('./scripts/update-suwayomi.cjs').pin(process.argv[1],process.argv[2])",
+              os.environ["RELEASE_VERSION"], source,
+          ], check=True)
+          PY
       - name: Check upstream without committing untested metadata
         if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_upstream)
         env:
@@ -155,6 +177,11 @@ jobs:
             BUILD_ARCH=${{ matrix.arch }}
           cache-from: type=gha,scope=suwayomi-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=suwayomi-${{ matrix.arch }}
+      - name: Verify CEF JavaScript and USB library persistence across restart
+        run: |
+          for attempt in 1 2 3; do
+            python build/tests/suwayomi_smoke.py suwayomi-ha:test --cef --usb-storage
+          done
       - name: Verify ingress, browser iframe, direct authentication and API
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser
       - name: Verify mounted USB storage and real library persistence

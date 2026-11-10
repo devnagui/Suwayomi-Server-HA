@@ -134,9 +134,13 @@ export function trackAppNavigation(page, base) {
     page.on('requestfailed', request => {
         activeRequests.delete(request);
         const url = new URL(request.url());
+        const query = url.pathname === base.pathname + 'api/graphql' && request.method() === 'POST';
+        const thumbnail = request.method() === 'GET' && url.pathname.startsWith(base.pathname) &&
+            /^api\/v1\/manga\/\d+\/thumbnail$/.test(url.pathname.slice(base.pathname.length));
+        // A background query/queued image can start after asset readiness, even
+        // while goto is awaiting headers. Only the outgoing document may cancel it.
         if (previousDocumentRequests.has(request) && url.origin === base.origin &&
-            url.pathname === base.pathname + 'api/graphql' &&
-            request.method() === 'POST' &&
+            (query || thumbnail) &&
             request.failure()?.errorText === 'net::ERR_ABORTED') {
             abortedRequests.add(request);
         }

@@ -193,6 +193,7 @@ def main() -> None:
     parser.add_argument("--browser", action="store_true")
     parser.add_argument("--usb-storage", action="store_true")
     parser.add_argument("--tls", action="store_true")
+    parser.add_argument("--cef", action="store_true", help="Execute real CEF JavaScript before and after the storage restart")
     parser.add_argument("--migration-from", help="Local 0.1.4 image used to seed an existing Basic-auth library/users")
     parser.add_argument("--auth-failure", action="store_true", help="Invalidate only the disposable server's JWT audience and verify fail-closed ingress")
     parser.add_argument("--webui-channel", choices=("bundled", "stable", "preview"), default="bundled")
@@ -226,6 +227,7 @@ def main() -> None:
             flaresolverr_url="http://172.30.32.2:8191",
             ssl=arguments.tls,
             webui_channel=arguments.webui_channel,
+            embedded_browser_enabled=arguments.cef,
         )
         remember_secrets(options)
         tls_directory = data / "ssl"
@@ -261,11 +263,15 @@ def main() -> None:
             client_created = True
             old_category = None
             if arguments.migration_from:
+                legacy_options_path = data / "legacy-options.json"
+                legacy_options_path.write_text(json.dumps({
+                    key: value for key, value in options.items() if key != "embedded_browser_enabled"
+                }), encoding="utf-8")
                 docker(
                     "run", "--detach", "--platform", platform, "--name", app, "--network", identifier, "--ip", "172.30.32.3",
                     "--publish", "127.0.0.1::4567",
                     "--mount", f"type=volume,source={volume},target=/data",
-                    "--mount", f"type=bind,source={options_path},target=/data/options.json,readonly",
+                    "--mount", f"type=bind,source={legacy_options_path},target=/data/options.json,readonly",
                     *storage_mounts, *tls_mounts, arguments.migration_from,
                 )
                 app_created = True
@@ -393,7 +399,7 @@ def main() -> None:
             assert active["aboutServer"] == {"version": metadata["server_version"]}
             assert active["settings"] == {
                 "flareSolverrEnabled": True, "flareSolverrUrl": options["flaresolverr_url"],
-                "kcefEnabled": False,
+                "kcefEnabled": arguments.cef,
                 "webUIFlavor": "CUSTOM" if arguments.webui_channel == "bundled" else "WEBUI",
                 "webUIChannel": arguments.webui_channel.upper(),
                 "webUIUpdateCheckInterval": 0.0 if arguments.webui_channel == "bundled" else 23.0,
@@ -481,6 +487,13 @@ def main() -> None:
             assert "errors" not in created
             category = created["data"]["createCategory"]["category"]
             assert category["name"] == "HA storage persistence check"
+            if arguments.cef:
+                baseline = f'{{user{{id}} category(id:{category["id"]}){{id name}}}}'
+                expected = {"data": {"user": {"id": 1}, "category": category}}
+                for url in (direct_url, ingress_url.rstrip("/")):
+                    assert graphql(url, baseline, token=authorization) == expected, "CEF pre-restart category/identity differs between direct and ingress"
+                print(docker("exec", "--env", "SUWAYOMI_TEST_TOKEN="+authorization, client,
+                            "python3", "/tests/suwayomi_probe.py", "--cef"), flush=True)
             if arguments.browser:
                 environment = os.environ | {"SUWAYOMI_TEST_USERNAME":options["auth_username"], "SUWAYOMI_TEST_PASSWORD":options["auth_password"]}
                 subprocess.run(
@@ -499,6 +512,12 @@ def main() -> None:
             wait_for_app(app, direct_url + "/", 403, authorization)
             assert request(direct_url + "/", authorization, PREFIX)[0] == 403, "Disabled direct access accepted a request"
             assert docker("exec", app, "cat", marker) == "preserved"
+            if arguments.cef:
+                assert graphql(ingress_url.rstrip("/"), "{user{id} settings{kcefEnabled}}", token=authorization) == {
+                    "data": {"user": {"id": 1}, "settings": {"kcefEnabled": True}},
+                }, "CEF or administrator identity changed after restart"
+                print(docker("exec", "--env", "SUWAYOMI_TEST_TOKEN="+authorization, client,
+                            "python3", "/tests/suwayomi_probe.py", "--cef"), flush=True)
             if old_category:
                 assert graphql(ingress_url.rstrip("/"), "{user{id roles}}", token=reader_token) == {
                     "data": {"user": identity},

@@ -85,7 +85,7 @@ test('a cancelled duplicate query requires successful identical data in the same
     assert.equal(await satisfied(laterStatus), false, 'Old subscription data cannot satisfy a new document');
 });
 
-test('only navigation-cancelled same-origin GraphQL POSTs are classified as expected', async () => {
+test('only navigation-cancelled same-origin GraphQL POSTs and manga thumbnail GETs are expected', async () => {
     const listeners = new Map();
     const page = {
         mainFrame: () => 'main-frame',
@@ -105,11 +105,18 @@ test('only navigation-cancelled same-origin GraphQL POSTs are classified as expe
         request('http://elsewhere/api/graphql'),
         request(new URL('api/graphql', base).href, 'GET'),
         request(new URL('api/graphql', base).href, 'POST', 'net::ERR_CONNECTION_RESET'),
+        request(new URL('api/v1/manga/1/thumbnail', base).href, 'GET'),
+        request(new URL('api/v1/manga/1/thumbnail', base).href, 'POST'),
+        request(new URL('api/v1/manga/1/thumbnail', base).href, 'GET', 'net::ERR_CONNECTION_RESET'),
+        request('http://elsewhere/api/hassio_ingress/test/api/v1/manga/1/thumbnail', 'GET'),
+        request(new URL('assets/thumbnail', base).href, 'GET'),
+        request(new URL('api/v1/chapter/1/page/0', base).href, 'GET'),
     ];
     const navigation = trackAppNavigation(page, base);
     for (const request of requests) listeners.get('request')(request);
     assert.equal(await navigation.goto(base.href), 'navigated');
-    assert.deepEqual(requests.map(navigation.isNavigationAbort), [true, false, false, false, false]);
+    assert.deepEqual(requests.map(navigation.isNavigationAbort),
+        [true, false, false, false, false, true, false, false, false, false, false]);
     const idleFailure = request(new URL('api/graphql', base).href);
     listeners.get('requestfailed')(idleFailure);
     assert.equal(navigation.isNavigationAbort(idleFailure), false);
@@ -119,14 +126,19 @@ test('only navigation-cancelled same-origin GraphQL POSTs are classified as expe
     listeners.get('requestfailed')(failureAfterNavigation);
     assert.equal(navigation.isNavigationAbort(failureAfterNavigation), false);
     const newDocumentFailure = request(new URL('api/graphql', base).href);
+    const newDocumentThumbnail = request(new URL('api/v1/manga/1/thumbnail', base).href, 'GET');
     page.goto = async () => {
         listeners.get('framenavigated')(page.mainFrame());
-        listeners.get('request')(newDocumentFailure);
-        listeners.get('requestfailed')(newDocumentFailure);
+        for (const request of [newDocumentFailure, newDocumentThumbnail]) {
+            listeners.get('request')(request);
+            listeners.get('requestfailed')(request);
+        }
     };
     await navigation.goto(base.href);
     assert.equal(navigation.isNavigationAbort(newDocumentFailure), false,
         'A new document failure must not be mistaken for a cancelled old request');
+    assert.equal(navigation.isNavigationAbort(newDocumentThumbnail), false,
+        'An incoming thumbnail failure during goto must still fail');
     const lateFailure = request(new URL('api/graphql', base).href);
     listeners.get('request')(lateFailure);
     page.goto = async () => listeners.get('framenavigated')(page.mainFrame());
@@ -324,6 +336,92 @@ test('thumbnail blob fetches settle before navigating away', async () => {
         assert.equal(await page.evaluate(() => globalThis.thumbnailLoaded), true);
     } finally {
         await browser?.close();
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('a late outgoing-document thumbnail is navigation-scoped, not an idle or incoming-document abort', async () => {
+    const pendingResponses = new Set();
+    let releaseNavigation;
+    let releaseQuery;
+    const server = createServer((request, response) => {
+        if (request.url.endsWith('/thumbnail')) {
+            pendingResponses.add(response);
+            response.on('close', () => pendingResponses.delete(response));
+            return;
+        }
+        if (request.url.endsWith('/api/graphql')) {
+            releaseQuery = () => {
+                response.writeHead(200, { 'Content-Type': 'application/json' });
+                response.end('{"data":{"mangas":[{"id":1}]}}');
+            };
+            return;
+        }
+        const sendDocument = () => {
+            response.writeHead(200, { 'Content-Type': 'text/html' });
+            response.end('<div id="root"><svg width="20" height="20"></svg></div>');
+        };
+        if (request.url.endsWith('/settings')) releaseNavigation = sendDocument;
+        else sendDocument();
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        const base = new URL(`http://127.0.0.1:${server.address().port}/api/hassio_ingress/test/`);
+        const navigation = trackAppNavigation(page, base);
+        const waitForAppReady = trackAppAssets(page, base);
+        await navigation.goto(base.href);
+        const query = page.waitForRequest('**/api/graphql');
+        await page.evaluate(() => {
+            fetch('api/graphql', { method: 'POST' }).then(response => response.json())
+                .then(() => fetch('api/v1/manga/1/thumbnail'))
+                .then(response => response.blob()).catch(() => {});
+        });
+        await query;
+        await waitForAppReady();
+
+        const startThumbnail = async () => {
+            const started = page.waitForRequest('**/thumbnail');
+            await page.evaluate(() => {
+                globalThis.controller = new AbortController();
+                fetch('api/v1/manga/1/thumbnail', { signal: controller.signal })
+                    .then(response => response.blob()).catch(() => {});
+            });
+            return started;
+        };
+        // A queued media load can start after readiness, while goto is waiting for
+        // the next document's headers. It still belongs to the outgoing document.
+        const thumbnailStarted = page.waitForRequest('**/thumbnail');
+        const destinationRequested = once(server, 'request');
+        const navigating = navigation.goto(new URL('settings', base).href);
+        await destinationRequested;
+        assert.ok(releaseNavigation);
+        assert.ok(releaseQuery);
+        releaseQuery();
+        const outgoing = await thumbnailStarted;
+        const cancelled = page.waitForEvent('requestfailed', request => request === outgoing);
+        releaseNavigation();
+        await navigating;
+        await cancelled;
+        assert.equal(outgoing.failure()?.errorText, 'net::ERR_ABORTED');
+        assert.equal(navigation.isNavigationAbort(outgoing), true,
+            'An outgoing thumbnail started during goto must not fail the next document');
+
+        for (const phase of ['incoming document', 'idle']) {
+            const current = await startThumbnail();
+            const failed = page.waitForEvent('requestfailed', request => request === current);
+            await page.evaluate(() => controller.abort());
+            await failed;
+            assert.equal(navigation.isNavigationAbort(current), false, `${phase} cancellations must still fail`);
+            await waitForAppReady();
+        }
+    } finally {
+        await browser?.close();
+        for (const response of pendingResponses) response.destroy();
+        server.closeAllConnections();
         await new Promise(resolve => server.close(resolve));
     }
 });

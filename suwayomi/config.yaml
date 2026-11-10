@@ -31,6 +31,7 @@ options:
   certfile: "fullchain.pem"
   keyfile: "privkey.pem"
   jvm_heap_mb: 768
+  embedded_browser_enabled: false
   webui_channel: bundled
   webui_update_check_interval: 23
   storage_path: "/data/server"
@@ -60,6 +61,7 @@ schema:
   certfile: "str"
   keyfile: "str"
   jvm_heap_mb: "int(256,1536)"
+  embedded_browser_enabled: "bool"
   webui_channel: "list(bundled|stable|preview)"
   webui_update_check_interval: "int(0,23)"
   storage_path: "str"

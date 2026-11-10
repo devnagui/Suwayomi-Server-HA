@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.9 (CEF candidate, not yet published)
+
+- Add opt-in `embedded_browser_enabled` for WebView-dependent extensions;
+  preserve disabled CEF for existing/default configurations.
+- Supervise Java directly with a private authenticated, TCP-disabled virtual
+  display that remains alive through JVM/database/browser shutdown.
+- Gate both native architectures on actual CEF JavaScript before and after a
+  USB-backed library restart, with matching administrator/category baselines.
+- Keep the new CEF option out of the strict 0.1.4 migration fixture; apply it
+  only to the replacement image.
+- Attribute cancelled outgoing-document thumbnail GETs to explicit navigation,
+  retaining errors for idle/current-document cancellations and other failures.
+- Candidate only: not published or installed on Home Assistant.
+
 ## 0.1.8
 
 - Automatically repackage [upstream Suwayomi server 7b061be09c9b](https://github.com/Suwayomi/Suwayomi-Server/commit/7b061be09c9b62a89a63addd11ac91c40fc2510f) with verified compatible WebUI r3578.

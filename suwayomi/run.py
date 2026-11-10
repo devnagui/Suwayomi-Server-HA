@@ -3,6 +3,8 @@ import json
 import math
 import os
 import re
+import secrets
+import selectors
 import signal
 import shutil
 import subprocess
@@ -34,6 +36,7 @@ OPTION_SETTINGS = {
     "flaresolverr_session_name": "flareSolverrSessionName",
     "flaresolverr_session_ttl": "flareSolverrSessionTtl",
     "flaresolverr_as_response_fallback": "flareSolverrAsResponseFallback",
+    "embedded_browser_enabled": "kcefEnabled",
 }
 FIXED_SETTINGS = {
     "ip": "127.0.0.1",
@@ -45,11 +48,11 @@ FIXED_SETTINGS = {
     "webUISubpath": "",
     "initialOpenInBrowserEnabled": False,
     "systemTrayEnabled": False,
-    "kcefEnabled": False,
     "authMode": "UI_LOGIN",
     "jwtTokenExpiry": "5m",
 }
 WEBUI_DEFAULTS = {"webui_channel": "bundled", "webui_update_check_interval": 23}
+RUNTIME_DEFAULTS = WEBUI_DEFAULTS | {"embedded_browser_enabled": False}
 EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path", "ssl", "certfile", "keyfile"} | set(WEBUI_DEFAULTS)
 RESERVED_SETTINGS = set(OPTION_SETTINGS.values()) | set(FIXED_SETTINGS) | {
     "rootDir", "authUsername", "authPassword", "basicAuthEnabled", "basicAuthUsername", "basicAuthPassword"
@@ -95,7 +98,7 @@ def storage_paths(options: dict[str, Any]) -> dict[str, str]:
 
 
 def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, Any]:
-    options = WEBUI_DEFAULTS | options
+    options = RUNTIME_DEFAULTS | options
     expected = set(OPTION_SETTINGS) | EXTRA_OPTIONS
     if set(options) != expected:
         raise ValueError("HA options do not match this app version; check the Configuration tab")
@@ -107,7 +110,7 @@ def build_settings(options: dict[str, Any], supported: set[str]) -> dict[str, An
         raise ValueError("Set auth_password to 12-256 characters without control characters before starting")
     if password != password.strip():
         raise ValueError("auth_password must not have leading or trailing whitespace; upstream UI login trims it")
-    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl"):
+    for key in ("direct_access_enabled", "download_as_cbz", "debug_logs_enabled", "flaresolverr_enabled", "flaresolverr_as_response_fallback", "ssl", "embedded_browser_enabled"):
         if type(options[key]) is not bool:
             raise ValueError(f"{key} must be a boolean")
     for key, minimum, maximum in (
@@ -251,6 +254,69 @@ def terminate_child(child: subprocess.Popen) -> None:
         child.terminate()
 
 
+def stop_child(child: subprocess.Popen) -> None:
+    terminate_child(child)
+    try:
+        child.wait(timeout=45)
+    except subprocess.TimeoutExpired:
+        print("WARNING: Process exceeded its shutdown deadline; terminating it.", file=sys.stderr, flush=True)
+        child.kill()
+        child.wait()
+
+
+def start_display(runtime: Path) -> tuple[subprocess.Popen, dict[str, str]]:
+    authority = runtime / "xauthority"
+    private_file(authority, "", uid=1001, gid=1001)
+    try:
+        subprocess.run(
+            ["xauth", "-f", str(authority)],
+            input=f"add :99 . {secrets.token_hex(16)}\n",
+            text=True, check=True, stdout=subprocess.DEVNULL, user=1001, group=1001, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("CEF display authentication exceeded its 10-second deadline") from None
+    display = subprocess.Popen(
+        ["Xvfb", ":99", "-displayfd", "1", "-screen", "0", "1280x720x24",
+         "-nolisten", "tcp", "-auth", str(authority)],
+        stdout=subprocess.PIPE, user=1001, group=1001,
+    )
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(display.stdout, selectors.EVENT_READ)
+            deadline = time.monotonic() + 10
+            ready = b""
+            while b"\n" not in ready:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise RuntimeError("CEF virtual display did not become ready within 10 seconds")
+                chunk = os.read(display.stdout.fileno(), 64)
+                if not chunk:
+                    raise RuntimeError("CEF virtual display exited during startup")
+                ready += chunk
+                if len(ready) > 64:
+                    raise RuntimeError("CEF virtual display returned an invalid readiness response")
+            if ready != b"99\n" or display.poll() is not None:
+                raise RuntimeError("CEF virtual display failed its readiness check")
+        return display, os.environ | {"DISPLAY": ":99", "XAUTHORITY": str(authority)}
+    except (OSError, RuntimeError, ValueError):
+        stop_child(display)
+        raise
+    finally:
+        display.stdout.close()
+
+
+def shutdown_children(children: list[subprocess.Popen], display: subprocess.Popen | None) -> None:
+    try:
+        for child in children:
+            terminate_child(child)
+        for child in reversed(children):
+            stop_child(child)
+    finally:
+        # CEF needs its display while the JVM runs database and browser shutdown hooks.
+        if display is not None:
+            stop_child(display)
+
+
 def prepare_webui(target: Path, packaged: Path = Path("/app/webui")) -> None:
     if not (packaged / "index.html").is_file():
         raise ValueError("The packaged server WebUI is missing")
@@ -387,7 +453,7 @@ def verify_ui_login(java: subprocess.Popen, username: str, password: str) -> dic
 
 def main() -> None:
     os.umask(0o077)
-    options = WEBUI_DEFAULTS | json.loads(Path("/data/options.json").read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    options = RUNTIME_DEFAULTS | json.loads(Path("/data/options.json").read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     metadata = json.loads(Path("/app/build-info.json").read_text(encoding="utf-8"))
     settings = build_settings(options, set(metadata["server_settings"]))
     tls = certificate_paths(options)
@@ -416,6 +482,7 @@ def main() -> None:
         flush=True,
     )
     children: list[subprocess.Popen] = []
+    display = None
     stopping = False
 
     def stop(_signum: int, _frame: Any) -> None:
@@ -427,7 +494,12 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        java = subprocess.Popen(["java", "@" + str(runtime / "java.args")], user=1001, group=1001)
+        environment = os.environ.copy()
+        if options["embedded_browser_enabled"]:
+            display, environment = start_display(broker_runtime)
+        if stopping:
+            return
+        java = subprocess.Popen(["java", "@" + str(runtime / "java.args")], user=1001, group=1001, env=environment)
         children.append(java)
         wait_ready(java)
         tokens = verify_ui_login(java, options["auth_username"], options["auth_password"])
@@ -454,6 +526,8 @@ def main() -> None:
             except urllib.error.URLError:
                 print("WARNING: External FlareSolverr is unavailable; protected sources need that service restored.", file=sys.stderr, flush=True)
         while not stopping:
+            if display is not None and display.poll() is not None:
+                raise RuntimeError("CEF virtual display exited; inspect the preceding display error")
             for child in children:
                 if child.poll() is not None:
                     raise RuntimeError("A required process exited; inspect the preceding server/proxy error")
@@ -473,14 +547,7 @@ def main() -> None:
             time.sleep(0.5)
     finally:
         stop(0, None)
-        for child in reversed(children):
-            terminate_child(child)
-            try:
-                child.wait(timeout=45)
-            except subprocess.TimeoutExpired:
-                print("WARNING: Process exceeded its shutdown deadline; terminating it.", file=sys.stderr, flush=True)
-                child.kill()
-                child.wait()
+        shutdown_children(children, display)
 
 
 if __name__ == "__main__":
