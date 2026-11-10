@@ -30,7 +30,8 @@ run for both architectures. The HA host pulls an image; it does not compile
 Kotlin/Gradle or run a second FlareSolverr browser.
 Release 0.1.4 passed the native two-architecture pipeline. Both images were
 fully pulled anonymously and verified to contain server v2.4.2435, WebUI r3569
-and the expected WebUI SHA-256. CEF remains disabled pending issue #2.
+and the expected WebUI SHA-256. Released images keep CEF disabled; the opt-in
+support below is an unreleased candidate pending native restart validation.
 
 ## Configurable storage, including USB
 
@@ -112,7 +113,8 @@ It also exposes `webui_channel` and `webui_update_check_interval`.
   FlareSolverr app; adjust it to your installed app's internal hostname.
   The app reports an unavailable solver but never restarts or replaces it.
 - Use a dedicated `flaresolverr_session_name` to avoid sharing another app's
-  browser session. No solver or embedded Chromium is bundled or launched here.
+  browser session. No second solver is bundled or launched here. The optional
+  embedded browser is separate and is not a replacement for FlareSolverr.
 - No third-party extension store is installed automatically. Supply current
   `extension_stores` JSON index URLs, not GitHub repository landing pages or
   the obsolete upstream `extensionRepos` setting.
@@ -134,11 +136,34 @@ It also exposes `webui_channel` and `webui_update_check_interval`.
 - `CEF is disabled` is a backend embedded-browser error, not an Android/WebUI
   rendering error. FlareSolverr handles Cloudflare HTTP responses but cannot
   replace all extensions' WebViews.
-- CEF remains disabled. Experimental support initialized successfully, but
-  CEF-enabled native restart/persistence tests intermittently failed. It was
-  excluded rather than weakening the release gates. Extensions requiring CEF
-  need a separately supported backend until restart safety is verified.
-  Progress is tracked in [issue #2](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
+- The unreleased candidate exposes `embedded_browser_enabled: true` for those
+  extensions. It remains off by default, including when upgrading an existing
+  configuration without the option. Change it in HA Configuration and restart
+  only this app after the candidate has passed both native architecture gates
+  and been published. Existing released images do not expose this option.
+- CEF downloads its native components into the server's storage tree on first
+  startup. Budget additional download/disk space and browser RAM **outside**
+  `jvm_heap_mb`; check available memory first on a 4 GiB Pi. Existing
+  FlareSolverr settings, source concurrency and library storage remain unchanged.
+- The candidate runs an authenticated, non-networked Xvfb display as the
+  unprivileged server user. Java is supervised directly, and the display stays
+  alive until Java's browser/database shutdown hooks finish. Display failures
+  are explicit app failures, not silent fallback to disabled CEF.
+- Earlier experiments intermittently failed category-persistence checks.
+  The new native release gate must load local HTML, execute JavaScript, and
+  verify the same administrator/category and real library after restart in
+  three independent trials per architecture.
+  Successful initialization alone is not sufficient. Progress is tracked in
+  [issue #2](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
+- Local candidate evidence (2026-11-10): 58 regression tests and four fresh
+  AMD64 runtime/USB restart trials passed, including JavaScript before and after
+  restart; the default-disabled path also passed. These checks layered the
+  adapter and libraries over the immutable
+  published 0.1.8 backend; they were not a full source rebuild. ARM64 under QEMU
+  reached CEF startup but its GPU subprocess trapped, so it did not pass and is
+  not native ARM64 evidence. Native AMD64/ARM64 CI gates, publication and an
+  explicitly approved HA update/restart remain pending. No live HA changes were
+  made while preparing this candidate.
 
 For less common global settings, `advanced_server_settings` accepts a JSON
 object with current upstream names and JSON value types, for example:
@@ -274,7 +299,14 @@ This package does not change your router, firewall, TLS or HA authentication.
 ### Automatic GitHub pipeline
 
 The [workflow](../.github/workflows/suwayomi.yml) runs daily at **04:15 UTC** and
-can be started manually from GitHub Actions. It:
+can be started manually from GitHub Actions.
+
+For packaging-only changes, dispatch with `update_upstream=false` and a newer
+`release_version` (for example `0.1.9`). The existing pin helper prepares that
+version while retaining the current server and WebUI. The app-store metadata is
+still committed only after both tested images have been promoted.
+
+The workflow:
 
 1. Checks upstream master and the latest compatible WebUI; a UI-only change also
    causes a new package build.
@@ -283,7 +315,9 @@ can be started manually from GitHub Actions. It:
 3. Builds native AMD64 and ARM64 candidates from the exact same prepared source.
 4. Runs the HA linter, unit tests, browser/iframe/API/authentication tests and
    actual library persistence tests for both private and USB storage, plus runtime
-   WebUI downloads. CEF is kept disabled and cannot be enabled through overrides.
+   WebUI downloads. The candidate additionally gates opt-in CEF on real JavaScript
+   execution before and after a USB library restart. CEF remains off by default
+   and cannot be enabled through unmanaged advanced-setting overrides.
    Both native architecture jobs also explicitly gate 0.1.4→UI_LOGIN migration,
    intentional authentication failure and stable WebUI login/ingress compatibility.
    Subnet smoke checks run sequentially within each job before candidate upload.

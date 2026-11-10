@@ -20,8 +20,9 @@ the optional authenticated server API.
 - AMD64 and ARM64/aarch64 images, including Raspberry Pi 4/5.
 - Configurable storage root: keep database, library, downloads, backups and
   local manga in an app-specific folder on an existing mounted USB disk.
-- Reuse an existing FlareSolverr service; no second solver or embedded Chromium
-  is started.
+- Reuse an existing FlareSolverr service; no second solver is started.
+- Opt-in embedded CEF browser for extensions that need WebView/JavaScript
+  (unreleased candidate; additional memory is required).
 - Optional direct access, disabled and unmapped by default, with mandatory
   native JWT protection for library/API/media (the login/static UI is public).
   Enable HTTPS with the existing HA certificates before
@@ -48,8 +49,11 @@ keep everything under that root.
 
 [Release 0.1.5](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.5)
 passed the native AMD64/ARM64 pipeline and was published on November 1, 2026.
-CEF is kept disabled
-pending [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
+Released images keep CEF disabled. This unreleased candidate adds
+`embedded_browser_enabled`, off by default, with a private authenticated virtual
+display and direct JVM supervision. Its release gate must execute real CEF
+JavaScript and preserve the library across restart on native AMD64 and ARM64
+before publication. See [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
 
 Release 0.1.5 migrates container-enforced Basic authentication to native
 `UI_LOGIN`, keeping the existing

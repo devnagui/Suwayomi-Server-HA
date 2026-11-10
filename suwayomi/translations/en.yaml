@@ -20,6 +20,9 @@ configuration:
   jvm_heap_mb:
     name: Maximum Java heap (MiB)
     description: Not a whole-app RAM cap. The 768 MiB default leaves headroom for HA and the shared FlareSolverr.
+  embedded_browser_enabled:
+    name: Enable embedded browser (CEF)
+    description: Required by extensions that use Android WebView or JavaScript. Downloads native CEF components on first startup and uses additional RAM outside the Java heap. Restart this app after changing.
   webui_channel:
     name: WebUI update channel
     description: Bundled keeps the tested image UI. Stable or preview enables upstream-compatible runtime downloads without replacing the server image; previous managed UI directories are retained on channel changes.

@@ -371,6 +371,7 @@ class SuwayomiTests(unittest.TestCase):
         self.assertTrue(any("--webui-channel stable --browser --usb-storage" in command for command in commands))
         for selector in ("--browser", "--usb-storage", "--webui-channel preview", "--tls"):
             self.assertTrue(any(selector in command for command in commands))
+        self.assertTrue(any("--cef --usb-storage" in command for command in commands))
 
     def test_build_applies_only_the_explicit_approved_overlays(self):
         docker = (APP / "Dockerfile").read_text()
@@ -678,13 +679,110 @@ class SuwayomiTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "managed"):
                 runner.build_settings(options() | {"advanced_server_settings": json.dumps({key: "PREVIEW"})}, SUPPORTED)
 
-    def test_embedded_browser_remains_disabled_until_restart_safety_is_proven(self):
+    def test_embedded_browser_is_opt_in_and_cannot_bypass_the_managed_option(self):
         for channel in ("bundled", "stable", "preview"):
             self.assertFalse(runner.build_settings(options() | {"webui_channel": channel}, SUPPORTED)["kcefEnabled"])
+            self.assertTrue(runner.build_settings(options() | {
+                "webui_channel": channel, "embedded_browser_enabled": True,
+            }, SUPPORTED)["kcefEnabled"])
+        legacy = options()
+        del legacy["embedded_browser_enabled"]
+        self.assertFalse(runner.build_settings(legacy, SUPPORTED)["kcefEnabled"])
+        for value in ("true", 1, None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "must be a boolean"):
+                runner.build_settings(options() | {"embedded_browser_enabled": value}, SUPPORTED)
         with self.assertRaisesRegex(ValueError, "managed"):
             runner.build_settings(options() | {"advanced_server_settings": '{"kcefEnabled":true}'}, SUPPORTED)
-        self.assertNotIn("embedded_browser_enabled", MANIFEST["options"])
-        self.assertNotIn("xvfb", (APP / "Dockerfile").read_text().lower())
+
+    def test_cef_display_uses_private_authentication_and_waits_for_readiness(self):
+        display = unittest.mock.Mock()
+        display.poll.return_value = None
+        selector = unittest.mock.MagicMock()
+        selector.__enter__.return_value = selector
+        selector.select.return_value = [(object(), 1)]
+        runtime = Path("/run/suwayomi")
+        with patch.object(runner, "private_file") as private, patch.object(
+            runner.secrets, "token_hex", return_value="test-cookie",
+        ), patch.object(runner.subprocess, "run") as run, patch.object(
+            runner.subprocess, "Popen", return_value=display,
+        ) as popen, patch.object(runner.selectors, "DefaultSelector", return_value=selector), patch.object(
+            runner.os, "read", side_effect=[b"9", b"9\n"],
+        ):
+            child, environment = runner.start_display(runtime)
+        self.assertIs(child, display)
+        self.assertEqual(environment["DISPLAY"], ":99")
+        self.assertEqual(environment["XAUTHORITY"], str(runtime / "xauthority"))
+        private.assert_called_once_with(runtime / "xauthority", "", uid=1001, gid=1001)
+        self.assertEqual(run.call_args.kwargs["input"], "add :99 . test-cookie\n")
+        self.assertNotIn("test-cookie", str(run.call_args.args))
+        arguments = popen.call_args.args[0]
+        self.assertIn("-auth", arguments)
+        self.assertIn("-nolisten", arguments)
+        self.assertNotIn("-ac", arguments)
+        display.stdout.close.assert_called_once()
+
+    def test_cef_display_readiness_failure_cleans_up_and_does_not_fallback(self):
+        for data, expected in ((None, "10 seconds"), (b"", "exited"), (b"98\n", "readiness")):
+            display = unittest.mock.Mock()
+            display.poll.return_value = None
+            selector = unittest.mock.MagicMock()
+            selector.__enter__.return_value = selector
+            selector.select.return_value = [] if data is None else [(object(), 1)]
+            with self.subTest(data=data), patch.object(runner, "private_file"), patch.object(
+                runner.subprocess, "run",
+            ), patch.object(runner.subprocess, "Popen", return_value=display), patch.object(
+                runner.selectors, "DefaultSelector", return_value=selector,
+            ), patch.object(runner.os, "read", return_value=data), patch.object(runner, "stop_child") as stop:
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    runner.start_display(Path("/run/suwayomi"))
+                stop.assert_called_once_with(display)
+                display.stdout.close.assert_called_once()
+
+    def test_cef_authentication_timeout_is_explicit_and_never_starts_a_display(self):
+        with patch.object(runner, "private_file"), patch.object(
+            runner.subprocess, "run", side_effect=subprocess.TimeoutExpired("xauth", 10),
+        ), patch.object(runner.subprocess, "Popen") as start:
+            with self.assertRaisesRegex(RuntimeError, "authentication exceeded"):
+                runner.start_display(Path("/run/suwayomi/auth"))
+            start.assert_not_called()
+
+    def test_cef_display_survives_until_the_jvm_shutdown_hooks_finish(self):
+        events = []
+        java = unittest.mock.Mock()
+        display = unittest.mock.Mock()
+        for name, child in (("java", java), ("display", display)):
+            child.poll.return_value = None
+            child.terminate.side_effect = lambda name=name: events.append(name + "-terminate")
+            child.wait.side_effect = lambda timeout=None, name=name: events.append(name + "-wait")
+        runner.shutdown_children([java], display)
+        self.assertLess(events.index("java-wait"), events.index("display-terminate"))
+        java.wait.assert_called_once_with(timeout=45)
+        display.wait.assert_called_once_with(timeout=45)
+
+    def test_cef_probe_requires_javascript_not_only_a_websocket_or_load_event(self):
+        spec = importlib.util.spec_from_file_location("suwayomi_cef_probe", ROOT / "tests" / "suwayomi_probe.py")
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        event = json.dumps({"type": "consoleMessage", "message": "HA_CEF_JS_RESULT:42"}).encode()
+        for payload, succeeds in ((b'{"type":"pong"}', False), (event, True)):
+            connection = unittest.mock.MagicMock()
+            connection.__enter__.return_value = connection
+            stream = io.BytesIO(b"HTTP/1.1 101 Switching Protocols\r\n\r\n" +
+                                bytes((0x01, 5)) + payload[:5] +
+                                bytes((0x80, len(payload) - 5)) + payload[5:])
+            connection.recv.side_effect = stream.read
+            with self.subTest(succeeds=succeeds), patch.object(
+                probe.socket, "create_connection", return_value=connection,
+            ), patch.dict(probe.os.environ, {"SUWAYOMI_TEST_TOKEN": "test-token"}), patch(
+                "sys.stdout", new_callable=io.StringIO,
+            ) as output:
+                if succeeds:
+                    probe.cef_webview()
+                    self.assertIn("executed JavaScript", output.getvalue())
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "closed"):
+                        probe.cef_webview()
+                self.assertNotIn("test-token", output.getvalue())
 
     def test_child_shutdown_signals_its_directly_supervised_process(self):
         class Child:

@@ -42,6 +42,9 @@ LABEL org.opencontainers.image.source="https://github.com/devnagui/Suwayomi-Serv
     io.hass.arch="$BUILD_ARCH"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx python3 openssl tini ca-certificates \
+    xvfb xauth libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libcups2t64 \
+    libdrm2 libgbm1 libgtk-3-0t64 libnss3 libx11-6 libxcomposite1 libxdamage1 \
+    libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1001 suwayomi \
     && useradd --uid 1001 --gid 1001 --create-home suwayomi \

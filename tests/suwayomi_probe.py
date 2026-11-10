@@ -9,6 +9,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -64,6 +65,77 @@ def websocket() -> None:
         elif length == 127:
             length = struct.unpack("!Q", read_exact(8))[0]
         assert json.loads(read_exact(length))["type"] == "connection_ack"
+
+
+def cef_webview() -> None:
+    with socket.create_connection(("172.30.32.3", 8080), timeout=120) as connection:
+        connection.sendall((
+            "GET /api/v1/webview HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
+            f"Sec-WebSocket-Key: {base64.b64encode(os.urandom(16)).decode()}\r\n"
+            f"Authorization: Bearer {os.environ['SUWAYOMI_TEST_TOKEN']}\r\n"
+            f"X-Ingress-Path: {PREFIX}\r\n\r\n"
+        ).encode())
+        headers = bytearray()
+        while not headers.endswith(b"\r\n\r\n"):
+            part = connection.recv(1)
+            if not part or len(headers) > 16384:
+                raise RuntimeError("CEF WebView upgrade failed")
+            headers.extend(part)
+        assert headers.startswith(b"HTTP/1.1 101"), "Authenticated CEF WebView upgrade failed"
+        message = json.dumps({
+            "type": "loadUrl", "url": "http://172.30.32.2:8191/cef-test", "width": 320, "height": 240,
+        }).encode()
+        mask = os.urandom(4)
+        length = bytes((0x80 | len(message),)) if len(message) < 126 else b"\xfe" + struct.pack("!H", len(message))
+        connection.sendall(b"\x81" + length + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(message)))
+        deadline = time.monotonic() + 120
+
+        def read_exact(length: int) -> bytes:
+            result = bytearray()
+            while len(result) < length:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("CEF WebView did not execute fixture JavaScript within 120 seconds")
+                connection.settimeout(remaining)
+                part = connection.recv(length - len(result))
+                if not part:
+                    raise RuntimeError("CEF WebView closed before executing fixture JavaScript")
+                result.extend(part)
+            return bytes(result)
+
+        text = bytearray()
+        while time.monotonic() < deadline:
+            frame = read_exact(2)
+            opcode = frame[0] & 0x0F
+            length = frame[1] & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", read_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", read_exact(8))[0]
+            if frame[1] & 0x80 or length > 8 * 1024 * 1024:
+                raise RuntimeError("CEF WebView returned an invalid frame")
+            payload = read_exact(length)
+            if opcode == 8:
+                raise RuntimeError("CEF WebView closed before executing fixture JavaScript")
+            if opcode == 9:
+                mask = os.urandom(4)
+                connection.sendall(bytes((0x8A, 0x80 | len(payload))) + mask +
+                                   bytes(c ^ mask[i % 4] for i, c in enumerate(payload)))
+                continue
+            if opcode not in (0, 1):
+                raise RuntimeError("CEF WebView returned an unexpected frame")
+            text.extend(payload)
+            if len(text) > 8 * 1024 * 1024:
+                raise RuntimeError("CEF WebView message exceeded the fixture size limit")
+            if not frame[0] & 0x80:
+                continue
+            event = json.loads(text)
+            text.clear()
+            if event.get("type") == "consoleMessage" and event.get("message") == "HA_CEF_JS_RESULT:42":
+                print("PASS: authenticated native CEF WebView loaded local HTML and executed JavaScript", flush=True)
+                return
+        raise RuntimeError("CEF WebView did not execute fixture JavaScript within 120 seconds")
 
 
 def probe() -> None:
@@ -175,9 +247,13 @@ class ExternalSolverStub(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        body = b'{"msg":"FlareSolverr is ready!","version":"test-only"}'
+        fixture = self.path == "/cef-test"
+        body = (
+            b'<!doctype html><title>CEF fixture</title><script>console.log("HA_CEF_JS_RESULT:"+(6*7))</script>'
+            if fixture else b'{"msg":"FlareSolverr is ready!","version":"test-only"}'
+        )
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/html" if fixture else "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -188,5 +264,7 @@ if __name__ == "__main__":
         solver = http.server.ThreadingHTTPServer(("0.0.0.0", 8191), ExternalSolverStub)
         threading.Thread(target=solver.serve_forever, daemon=True).start()
         http.server.ThreadingHTTPServer(("0.0.0.0", 8123), IngressSimulator).serve_forever()
+    elif "--cef" in sys.argv:
+        cef_webview()
     else:
         probe()
