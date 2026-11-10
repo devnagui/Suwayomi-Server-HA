@@ -85,6 +85,10 @@ to their navigation, and the browser must actually render the seeded library
 manga instead of merely showing a page shell. Run the Chromium regressions with
 `node --test tests/browser_ready.test.mjs` after installing the locked test
 dependencies and Playwright Chromium.
+Outgoing-document manga-thumbnail GETs use that same explicit-navigation scope:
+a late background query may queue an image while navigation awaits headers.
+Idle/current-document thumbnail aborts, other image routes and non-abort
+failures remain errors.
 Newer Apollo-based preview UIs also cancel redundant queries during initialization.
 A cancelled query is accepted only when an identical query and variables in the
 same document delivered HTTP 200 with actual data and no GraphQL errors, or when

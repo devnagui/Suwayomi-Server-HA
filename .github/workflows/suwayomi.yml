@@ -177,15 +177,15 @@ jobs:
             BUILD_ARCH=${{ matrix.arch }}
           cache-from: type=gha,scope=suwayomi-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=suwayomi-${{ matrix.arch }}
-      - name: Verify ingress, browser iframe, direct authentication and API
-        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser
-      - name: Verify mounted USB storage and real library persistence
-        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --usb-storage
       - name: Verify CEF JavaScript and USB library persistence across restart
         run: |
           for attempt in 1 2 3; do
             python build/tests/suwayomi_smoke.py suwayomi-ha:test --cef --usb-storage
           done
+      - name: Verify ingress, browser iframe, direct authentication and API
+        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser
+      - name: Verify mounted USB storage and real library persistence
+        run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --usb-storage
       - name: Verify runtime WebUI downloads and preserved ingress
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --webui-channel preview --browser --usb-storage
       - name: Verify direct HTTPS, configured certificate and renewal reload

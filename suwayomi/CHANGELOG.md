@@ -8,6 +8,10 @@
   display that remains alive through JVM/database/browser shutdown.
 - Gate both native architectures on actual CEF JavaScript before and after a
   USB-backed library restart, with matching administrator/category baselines.
+- Keep the new CEF option out of the strict 0.1.4 migration fixture; apply it
+  only to the replacement image.
+- Attribute cancelled outgoing-document thumbnail GETs to explicit navigation,
+  retaining errors for idle/current-document cancellations and other failures.
 - Candidate only: not published or installed on Home Assistant.
 
 ## 0.1.8

@@ -263,11 +263,15 @@ def main() -> None:
             client_created = True
             old_category = None
             if arguments.migration_from:
+                legacy_options_path = data / "legacy-options.json"
+                legacy_options_path.write_text(json.dumps({
+                    key: value for key, value in options.items() if key != "embedded_browser_enabled"
+                }), encoding="utf-8")
                 docker(
                     "run", "--detach", "--platform", platform, "--name", app, "--network", identifier, "--ip", "172.30.32.3",
                     "--publish", "127.0.0.1::4567",
                     "--mount", f"type=volume,source={volume},target=/data",
-                    "--mount", f"type=bind,source={options_path},target=/data/options.json,readonly",
+                    "--mount", f"type=bind,source={legacy_options_path},target=/data/options.json,readonly",
                     *storage_mounts, *tls_mounts, arguments.migration_from,
                 )
                 app_created = True
