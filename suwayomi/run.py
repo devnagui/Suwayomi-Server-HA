@@ -437,7 +437,7 @@ def wait_ready(java: subprocess.Popen) -> None:
         except urllib.error.HTTPError as error:
             if error.code not in (404, 503):
                 raise RuntimeError(f"Suwayomi startup returned HTTP {error.code}") from error
-        except urllib.error.URLError:
+        except (urllib.error.URLError, TimeoutError):
             pass
         time.sleep(1)
     raise RuntimeError(

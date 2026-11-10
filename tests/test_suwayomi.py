@@ -44,6 +44,29 @@ class SuwayomiTests(unittest.TestCase):
         self.assertEqual(runner.STARTUP_TIMEOUT_SECONDS, 240)
         self.assertGreater(MANIFEST["timeout"], runner.STARTUP_TIMEOUT_SECONDS)
 
+    def test_wait_ready_retries_transient_http_timeouts(self):
+        class Response(io.BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        java = unittest.mock.Mock()
+        java.poll.return_value = None
+        responses = [
+            TimeoutError("timed out"),
+            Response(b'<base href="/"><script src="./assets/main.js"></script>'),
+            Response(b"j"),
+        ]
+        with patch.object(runner.urllib.request, "urlopen", side_effect=responses), patch.object(
+            runner.time, "monotonic", side_effect=[0, 1, 2]
+        ), patch.object(runner.time, "sleep") as sleep:
+            runner.wait_ready(java)
+        sleep.assert_called_once_with(1)
+
     def test_expiry_smoke_restores_normal_lifetime_before_refresh_on_slow_runners(self):
         smoke_spec = importlib.util.spec_from_file_location("suwayomi_expiry_smoke", ROOT / "tests" / "suwayomi_smoke.py")
         smoke = importlib.util.module_from_spec(smoke_spec)

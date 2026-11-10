@@ -54,7 +54,7 @@ adds `embedded_browser_enabled`, off by default, with a private authenticated
 virtual display and direct JVM supervision. Both native AMD64 and ARM64 passed
 three independent real-CEF JavaScript and USB library-restart trials before
 publication. See [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
-[Release 0.1.10](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.10)
+[Release 0.1.11](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.11)
 extends startup readiness for slow USB-backed libraries with embedded CEF. See [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
 
 Release 0.1.5 migrates container-enforced Basic authentication to native

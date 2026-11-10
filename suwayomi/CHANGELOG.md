@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.11
+
+- Retry transient root or asset HTTP timeouts during startup readiness instead
+  of terminating an otherwise healthy slow USB/CEF initialization.
+- Keep push builds on the committed server/WebUI pins; upstream update checks
+  remain scheduled or explicitly dispatched.
+
 ## 0.1.10
 
 - Allow slow USB-backed libraries with embedded CEF up to four minutes to

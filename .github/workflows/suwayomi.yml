@@ -70,7 +70,7 @@ jobs:
           ], check=True)
           PY
       - name: Check upstream without committing untested metadata
-        if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_upstream)
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.update_upstream)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/update-suwayomi.cjs --latest
