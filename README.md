@@ -22,7 +22,7 @@ the optional authenticated server API.
   local manga in an app-specific folder on an existing mounted USB disk.
 - Reuse an existing FlareSolverr service; no second solver is started.
 - Opt-in embedded CEF browser for extensions that need WebView/JavaScript
-  (unreleased candidate; additional memory is required).
+  (available from 0.1.9; additional memory is required).
 - Optional direct access, disabled and unmapped by default, with mandatory
   native JWT protection for library/API/media (the login/static UI is public).
   Enable HTTPS with the existing HA certificates before
@@ -49,11 +49,11 @@ keep everything under that root.
 
 [Release 0.1.5](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.5)
 passed the native AMD64/ARM64 pipeline and was published on November 1, 2026.
-Released images keep CEF disabled. This unreleased candidate adds
-`embedded_browser_enabled`, off by default, with a private authenticated virtual
-display and direct JVM supervision. Its release gate must execute real CEF
-JavaScript and preserve the library across restart on native AMD64 and ARM64
-before publication. See [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
+[Release 0.1.9](https://github.com/devnagui/Suwayomi-Server-HA/releases/tag/v0.1.9)
+adds `embedded_browser_enabled`, off by default, with a private authenticated
+virtual display and direct JVM supervision. Both native AMD64 and ARM64 passed
+three independent real-CEF JavaScript and USB library-restart trials before
+publication. See [restart-safety validation](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
 
 Release 0.1.5 migrates container-enforced Basic authentication to native
 `UI_LOGIN`, keeping the existing
@@ -149,10 +149,11 @@ workflow**. Keep `update_upstream` enabled to check the latest upstream source.
 Runtime downloads can be enabled in HA Configuration with
 `webui_channel: preview` (or `stable`) and
 `webui_update_check_interval: 23`. The upstream server selects a compatible UI.
-CEF-dependent sources still require a separately supported backend: experimental
-embedded-browser support did not consistently pass restart/persistence checks
-and is not included in this release. A disabled-CEF error can appear in Android
-as well as WebUI; runtime WebUI updates do not enable CEF.
+For CEF-dependent sources, use app 0.1.9 or newer, set
+`embedded_browser_enabled: true` in HA Configuration and restart only this app.
+Check available RAM first; native browser memory is outside the Java heap.
+A disabled-CEF error can appear in Android as well as WebUI; runtime WebUI
+updates and FlareSolverr do not enable the embedded browser.
 
 Server updates shown inside Suwayomi refer to upstream server releases, not HA
 app releases; install the tested HA image instead of downloading/replacing its

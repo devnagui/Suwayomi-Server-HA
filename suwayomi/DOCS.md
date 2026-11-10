@@ -30,8 +30,8 @@ run for both architectures. The HA host pulls an image; it does not compile
 Kotlin/Gradle or run a second FlareSolverr browser.
 Release 0.1.4 passed the native two-architecture pipeline. Both images were
 fully pulled anonymously and verified to contain server v2.4.2435, WebUI r3569
-and the expected WebUI SHA-256. Released images keep CEF disabled; the opt-in
-support below is an unreleased candidate pending native restart validation.
+and the expected WebUI SHA-256. App 0.1.9 adds opt-in CEF after repeated native
+AMD64/ARM64 JavaScript and USB restart validation; it remains off by default.
 
 ## Configurable storage, including USB
 
@@ -136,16 +136,15 @@ It also exposes `webui_channel` and `webui_update_check_interval`.
 - `CEF is disabled` is a backend embedded-browser error, not an Android/WebUI
   rendering error. FlareSolverr handles Cloudflare HTTP responses but cannot
   replace all extensions' WebViews.
-- The unreleased candidate exposes `embedded_browser_enabled: true` for those
+- App 0.1.9 exposes `embedded_browser_enabled: true` for those
   extensions. It remains off by default, including when upgrading an existing
   configuration without the option. Change it in HA Configuration and restart
-  only this app after the candidate has passed both native architecture gates
-  and been published. Existing released images do not expose this option.
+  only this app. Versions before 0.1.9 do not expose this option.
 - CEF downloads its native components into the server's storage tree on first
-  startup. Budget additional download/disk space and browser RAM **outside**
+  initialization. Budget additional download/disk space and browser RAM **outside**
   `jvm_heap_mb`; check available memory first on a 4 GiB Pi. Existing
   FlareSolverr settings, source concurrency and library storage remain unchanged.
-- The candidate runs an authenticated, non-networked Xvfb display as the
+- The app runs an authenticated, non-networked Xvfb display as the
   unprivileged server user. Java is supervised directly, and the display stays
   alive until Java's browser/database shutdown hooks finish. Display failures
   are explicit app failures, not silent fallback to disabled CEF.
@@ -155,15 +154,15 @@ It also exposes `webui_channel` and `webui_update_check_interval`.
   three independent trials per architecture.
   Successful initialization alone is not sufficient. Progress is tracked in
   [issue #2](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
-- Local candidate evidence (2026-11-10): 58 regression tests and four fresh
-  AMD64 runtime/USB restart trials passed, including JavaScript before and after
-  restart; the default-disabled path also passed. These checks layered the
-  adapter and libraries over the immutable
-  published 0.1.8 backend; they were not a full source rebuild. ARM64 under QEMU
-  reached CEF startup but its GPU subprocess trapped, so it did not pass and is
-  not native ARM64 evidence. Native AMD64/ARM64 CI gates, publication and an
-  explicitly approved HA update/restart remain pending. No live HA changes were
-  made while preparing this candidate.
+- Native full-source validation (2026-11-10):
+  [both AMD64 and ARM64 passed all gates](https://github.com/devnagui/Suwayomi-Server-HA/actions/runs/42868678917),
+  including three independent CEF/USB restart trials per architecture with real
+  JavaScript before and after restart and matching administrator/category/library
+  baselines. Default-disabled browser/API, migration, authentication-failure,
+  runtime WebUI and TLS checks also passed. The focused suites passed 58 Python
+  and nine Chromium regressions. Emulated ARM64 is not used as native evidence.
+  The [0.1.9 publication run](https://github.com/devnagui/Suwayomi-Server-HA/actions/runs/42870234361)
+  repeated the full gates with the final version before promoting both images.
 
 For less common global settings, `advanced_server_settings` accepts a JSON
 object with current upstream names and JSON value types, for example:
@@ -315,7 +314,7 @@ The workflow:
 3. Builds native AMD64 and ARM64 candidates from the exact same prepared source.
 4. Runs the HA linter, unit tests, browser/iframe/API/authentication tests and
    actual library persistence tests for both private and USB storage, plus runtime
-   WebUI downloads. The candidate additionally gates opt-in CEF on real JavaScript
+   WebUI downloads. Publication additionally gates opt-in CEF on real JavaScript
    execution before and after a USB library restart. CEF remains off by default
    and cannot be enabled through unmanaged advanced-setting overrides.
    Both native architecture jobs also explicitly gate 0.1.4→UI_LOGIN migration,

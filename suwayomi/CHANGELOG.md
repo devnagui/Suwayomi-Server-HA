@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.9 (CEF candidate, not yet published)
+## 0.1.9
 
 - Add opt-in `embedded_browser_enabled` for WebView-dependent extensions;
   preserve disabled CEF for existing/default configurations.
@@ -12,7 +12,7 @@
   only to the replacement image.
 - Attribute cancelled outgoing-document thumbnail GETs to explicit navigation,
   retaining errors for idle/current-document cancellations and other failures.
-- Candidate only: not published or installed on Home Assistant.
+- Preserve the existing server/WebUI pins in this packaging-only release.
 
 ## 0.1.8
 
