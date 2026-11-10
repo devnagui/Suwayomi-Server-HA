@@ -154,6 +154,9 @@ It also exposes `webui_channel` and `webui_update_check_interval`.
   three independent trials per architecture.
   Successful initialization alone is not sufficient. Progress is tracked in
   [issue #2](https://github.com/devnagui/Suwayomi-Server-HA/issues/2).
+- An enabled browser does not repair unavailable websites or obsolete extensions.
+  A later `Timed out waiting for WebView` needs separate source/compatibility
+  diagnosis; it is not the same failure as `CEF is disabled`.
 - Native full-source validation (2026-11-10):
   [both AMD64 and ARM64 passed all gates](https://github.com/devnagui/Suwayomi-Server-HA/actions/runs/42868678917),
   including three independent CEF/USB restart trials per architecture with real
