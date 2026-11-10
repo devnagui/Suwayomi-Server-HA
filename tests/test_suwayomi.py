@@ -40,6 +40,10 @@ def options():
 
 
 class SuwayomiTests(unittest.TestCase):
+    def test_supervisor_timeout_exceeds_internal_readiness_deadline(self):
+        self.assertEqual(runner.STARTUP_TIMEOUT_SECONDS, 240)
+        self.assertGreater(MANIFEST["timeout"], runner.STARTUP_TIMEOUT_SECONDS)
+
     def test_expiry_smoke_restores_normal_lifetime_before_refresh_on_slow_runners(self):
         smoke_spec = importlib.util.spec_from_file_location("suwayomi_expiry_smoke", ROOT / "tests" / "suwayomi_smoke.py")
         smoke = importlib.util.module_from_spec(smoke_spec)

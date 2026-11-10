@@ -53,6 +53,7 @@ FIXED_SETTINGS = {
 }
 WEBUI_DEFAULTS = {"webui_channel": "bundled", "webui_update_check_interval": 23}
 RUNTIME_DEFAULTS = WEBUI_DEFAULTS | {"embedded_browser_enabled": False}
+STARTUP_TIMEOUT_SECONDS = 240
 EXTRA_OPTIONS = {"auth_username", "auth_password", "direct_access_enabled", "jvm_heap_mb", "advanced_server_settings", "storage_path", "ssl", "certfile", "keyfile"} | set(WEBUI_DEFAULTS)
 RESERVED_SETTINGS = set(OPTION_SETTINGS.values()) | set(FIXED_SETTINGS) | {
     "rootDir", "authUsername", "authPassword", "basicAuthEnabled", "basicAuthUsername", "basicAuthPassword"
@@ -411,7 +412,7 @@ def private_file(path: Path, content: str, uid: int = 0, gid: int = 0, mode: int
 
 def wait_ready(java: subprocess.Popen) -> None:
     request = urllib.request.Request("http://127.0.0.1:4568/")
-    deadline = time.monotonic() + 120
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if java.poll() is not None:
             raise RuntimeError("Suwayomi exited during startup; inspect the preceding server error")
@@ -439,7 +440,9 @@ def wait_ready(java: subprocess.Popen) -> None:
         except urllib.error.URLError:
             pass
         time.sleep(1)
-    raise RuntimeError("Suwayomi did not become ready within 120 seconds")
+    raise RuntimeError(
+        f"Suwayomi did not become ready within {STARTUP_TIMEOUT_SECONDS} seconds"
+    )
 
 
 def verify_ui_login(java: subprocess.Popen, username: str, password: str) -> dict[str, str]:

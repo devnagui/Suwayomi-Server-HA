@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.10
+
+- Allow slow USB-backed libraries with embedded CEF up to four minutes to
+  initialize before failing readiness, with a five-minute Supervisor startup
+  allowance.
+- Preserve the existing server/WebUI pins in this packaging-only release.
+
 ## 0.1.9
 
 - Add opt-in `embedded_browser_enabled` for WebView-dependent extensions;
