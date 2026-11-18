@@ -157,6 +157,15 @@ Check available RAM first; native browser memory is outside the Java heap.
 A disabled-CEF error can appear in Android as well as WebUI; runtime WebUI
 updates and FlareSolverr do not enable the embedded browser.
 
+The `webview-navigation-snapshot.patch` overlay captures CEF main-frame navigation
+URLs before Android Handler dispatch. This prevents a null URL from reaching
+extensions' concurrent navigation sets. Subframes do not generate Android page
+lifecycle callbacks; missing/empty main-frame URLs emit a URL-free warning instead
+of an invented URL or successful callback. Genuine `about:blank` URLs remain valid.
+Both page-start and page-finish callbacks use the snapshot. Focused AndroidCompat
+JVM regressions run during each image build; native CEF gates remain required.
+This repair does not turn an empty chapter page list into a valid download.
+
 Server updates shown inside Suwayomi refer to upstream server releases, not HA
 app releases; install the tested HA image instead of downloading/replacing its
 JAR. On November 2, 2026, `v2.4.2476` is a genuine upgrade from `v2.4.2435`;

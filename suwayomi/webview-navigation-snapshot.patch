@@ -1,0 +1,217 @@
+diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
+--- a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
++++ b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
+@@ -262,9 +262,12 @@
+             frame: CefFrame,
+             httpStatusCode: Int,
+         ) {
+-            val url = frame.url ?: ""
+-            Log.v(TAG, "Load end $url")
+-            handler.post {
++            val navigation =
++                KcefNavigationSnapshot.capture(frame.isMain, { frame.url }) {
++                    Log.w(TAG, "Skipping page-finished callback: missing native navigation URL")
++                }
++            Log.v(TAG, "Load end")
++            navigation?.post({ handler.post(it) }) { url ->
+                 if (httpStatusCode == 404) {
+                     viewClient.onReceivedError(
+                         view,
+@@ -309,6 +312,10 @@
+             frame: CefFrame,
+             transitionType: CefRequest.TransitionType,
+         ) {
++            val navigation =
++                KcefNavigationSnapshot.capture(frame.isMain, { frame.url }) {
++                    Log.w(TAG, "Skipping page-started callback: missing native navigation URL")
++                }
+             Log.v(TAG, "Load start, pushing mappings")
+             mappings.forEach {
+                 val js =
+@@ -333,7 +340,7 @@
+                 browser.executeJavaScript(js, "SUWAYOMI ${it.toNice()}", 0)
+             }
+
+-            handler.post { viewClient.onPageStarted(view, frame.url, null) }
++            navigation?.post({ handler.post(it) }) { url -> viewClient.onPageStarted(view, url, null) }
+         }
+     }
+
+diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshot.kt b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshot.kt
+new file mode 100644
+--- /dev/null
++++ b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshot.kt
+@@ -0,0 +1,33 @@
++package xyz.nulldev.androidcompat.webkit
++
++/**
++ * Android page lifecycle callbacks describe the main frame, not every CEF frame.
++ * Read native state on the CEF callback thread; the frame may no longer be valid
++ * when the Android Handler executes. Never invent a URL or a successful load.
++ */
++internal class KcefNavigationSnapshot private constructor(
++    private val url: String,
++) {
++    fun post(
++        enqueue: (Runnable) -> Unit,
++        notify: (String) -> Unit,
++    ) {
++        enqueue(Runnable { notify(url) })
++    }
++
++    companion object {
++        fun capture(
++            isMainFrame: Boolean,
++            readUrl: () -> String?,
++            missingUrl: () -> Unit,
++        ): KcefNavigationSnapshot? {
++            if (!isMainFrame) return null
++            val url = readUrl()
++            if (url.isNullOrEmpty()) {
++                missingUrl()
++                return null
++            }
++            return KcefNavigationSnapshot(url)
++        }
++    }
++}
+diff --git a/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshotTest.kt b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshotTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshotTest.kt
+@@ -0,0 +1,135 @@
++package xyz.nulldev.androidcompat.webkit
++
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFailsWith
++import kotlin.test.assertNotNull
++import kotlin.test.assertNull
++import kotlin.test.assertTrue
++import kotlin.test.fail
++
++class KcefNavigationSnapshotTest {
++    @Test
++    fun `page started uses captured URL after native frame becomes unavailable`() {
++        val pending = mutableListOf<Runnable>()
++        val refreshPages = ConcurrentHashMap.newKeySet<String>()
++        val started = mutableListOf<String>()
++        var nativeUrl: String? = "https://example.invalid/chapter"
++        var reads = 0
++        val navigation =
++            assertNotNull(
++                KcefNavigationSnapshot.capture(true, {
++                    reads++
++                    nativeUrl
++                }) { fail("Unexpected missing URL") },
++            )
++        navigation.post({ pending.add(it) }) { url ->
++            // Same null-intolerant membership lookup as Keiyoushi onPageStarted.
++            if (url !in refreshPages) started.add(url)
++        }
++        assertEquals(1, reads)
++        assertEquals(emptyList(), started)
++        nativeUrl = null
++        pending.single().run()
++        assertEquals(listOf("https://example.invalid/chapter"), started)
++        assertEquals(1, reads)
++    }
++
++    @Test
++    fun `page finished cannot change its URL while waiting for Handler`() {
++        val pending = mutableListOf<Runnable>()
++        val refreshPages = ConcurrentHashMap.newKeySet<String>()
++        val finished = mutableListOf<String>()
++        var nativeUrl: String? = "https://example.invalid/original"
++        val navigation =
++            assertNotNull(
++                KcefNavigationSnapshot.capture(true, { nativeUrl }) { fail("Missing URL") },
++            )
++        navigation.post({ pending.add(it) }) { url ->
++            // Same null-intolerant removal as Keiyoushi onPageFinished.
++            if (!refreshPages.remove(url)) finished.add(url)
++        }
++        nativeUrl = "https://example.invalid/next"
++        pending.single().run()
++        assertEquals(listOf("https://example.invalid/original"), finished)
++    }
++
++    @Test
++    fun `refresh page filtering still receives the actual captured key`() {
++        val pending = mutableListOf<Runnable>()
++        val refreshPages = ConcurrentHashMap.newKeySet<String>()
++        val url = "https://example.invalid/redirect"
++        refreshPages.add(url)
++        val navigation =
++            assertNotNull(
++                KcefNavigationSnapshot.capture(true, { url }) { fail("Missing URL") },
++            )
++        navigation.post({ pending.add(it) }) { captured ->
++            assertTrue(captured in refreshPages)
++            refreshPages.remove(captured)
++        }
++        pending.single().run()
++        assertEquals(emptySet(), refreshPages)
++    }
++
++    @Test
++    fun `missing URL diagnoses but never queues a successful page callback`() {
++        for (url in listOf(null, "")) {
++            val pending = mutableListOf<Runnable>()
++            var missing = 0
++            val navigation = KcefNavigationSnapshot.capture(true, { url }) { missing++ }
++            navigation?.post({ pending.add(it) }) { fail("Invented successful page") }
++            assertNull(navigation)
++            assertEquals(1, missing)
++            assertEquals(emptyList(), pending)
++        }
++    }
++
++    @Test
++    fun `subframe does not read native URL or report a main frame lifecycle event`() {
++        val pending = mutableListOf<Runnable>()
++        val navigation =
++            KcefNavigationSnapshot.capture(false, { fail("Read subframe URL") }) {
++                fail("Subframe is not a missing main-frame URL")
++            }
++        navigation?.post({ pending.add(it) }) { fail("Subframe lifecycle event") }
++        assertNull(navigation)
++        assertEquals(emptyList(), pending)
++    }
++
++    @Test
++    fun `genuine about blank and srcdoc URLs are not replaced or rejected`() {
++        for (url in listOf("about:blank", "about:srcdoc")) {
++            val pending = mutableListOf<Runnable>()
++            val received = mutableListOf<String>()
++            val navigation =
++                assertNotNull(
++                    KcefNavigationSnapshot.capture(true, { url }) { fail("Rejected real URL") },
++                )
++            navigation.post({ pending.add(it) }) { received.add(it) }
++            pending.single().run()
++            assertEquals(listOf(url), received)
++        }
++    }
++
++    @Test
++    fun `client failure is not converted into a successful page`() {
++        val pending = mutableListOf<Runnable>()
++        val navigation =
++            assertNotNull(
++                KcefNavigationSnapshot.capture(true, { "about:blank" }) { fail("Missing URL") },
++            )
++        navigation.post({ pending.add(it) }) { error("Client callback failed") }
++        assertFailsWith<IllegalStateException> { pending.single().run() }
++    }
++
++    @Test
++    fun `regression fixture reproduces the original delayed null lookup`() {
++        val refreshPages = ConcurrentHashMap.newKeySet<String>()
++        var nativeUrl: String? = "about:blank"
++        val originalCallback = Runnable { nativeUrl in refreshPages }
++        nativeUrl = null
++        assertFailsWith<NullPointerException> { originalCallback.run() }
++    }
++}

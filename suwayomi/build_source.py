@@ -9,7 +9,11 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-SERVER_PATCHES = ("bundled-webui-version.patch", "scoped-manga-cancellation.patch")
+SERVER_PATCHES = (
+    "bundled-webui-version.patch",
+    "scoped-manga-cancellation.patch",
+    "webview-navigation-snapshot.patch",
+)
 
 
 def pin_webui(source: Path, revision: str, minimum_server: int, digest: str) -> None:

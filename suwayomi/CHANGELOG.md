@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.12
+
+- Capture CEF main-frame navigation URLs before Android Handler dispatch,
+  preventing null URLs from reaching extensions' page-start callbacks.
+- Apply the same main-frame contract to page-finish notifications; report
+  missing URLs without inventing a URL or successful page load.
+- Run eight focused AndroidCompat JVM regressions during both image builds
+  and include the overlay and its SHA-256 in packaged provenance.
+- Preserve the existing server/WebUI pins, authentication, storage and
+  resource settings. Source-specific empty chapters remain separate failures.
+
 ## 0.1.11
 
 - Retry transient root or asset HTTP timeouts during startup readiness instead

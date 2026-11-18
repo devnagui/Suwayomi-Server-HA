@@ -13,13 +13,14 @@ RUN git clone https://github.com/Suwayomi/Suwayomi-Server.git . \
     && test "$(git rev-parse HEAD)" = "$SOURCE_REF"
 COPY build_source.py /build_source.py
 COPY gradle_retry.py /gradle_retry.py
-COPY bundled-webui-version.patch scoped-manga-cancellation.patch /source/
-RUN git apply --check bundled-webui-version.patch scoped-manga-cancellation.patch \
-    && git apply bundled-webui-version.patch scoped-manga-cancellation.patch
+COPY bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch /source/
+RUN git apply --check bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch \
+    && git apply bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch
 RUN python3 /build_source.py --pin-webui /source "$WEBUI_REF" "$WEBUI_MIN_SERVER" "$WEBUI_SHA256"
 RUN --mount=type=cache,target=/root/.gradle \
     cp .github/runner-files/ci-gradle.properties /root/.gradle/gradle.properties \
     && python3 /gradle_retry.py -- ./gradlew --no-daemon --max-workers=2 --init-script /source/ha-webui.gradle \
+       :AndroidCompat:test --tests xyz.nulldev.androidcompat.webkit.KcefNavigationSnapshotTest \
        :server:test --tests suwayomi.tachidesk.manga.impl.update.UpdaterTest \
        --tests suwayomi.tachidesk.graphql.UpdateMutationTest \
        --tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest \

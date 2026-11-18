@@ -333,6 +333,7 @@ class SuwayomiTests(unittest.TestCase):
         self.assertIn(":server:test --tests suwayomi.tachidesk.manga.impl.update.UpdaterTest", docker)
         self.assertIn("--tests suwayomi.tachidesk.graphql.UpdateMutationTest", docker)
         self.assertIn("--tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest", docker)
+        self.assertIn(":AndroidCompat:test --tests xyz.nulldev.androidcompat.webkit.KcefNavigationSnapshotTest", docker)
         self.assertIn("git rev-parse HEAD", docker)
         self.assertIn(f"ARG BUILD_VERSION={MANIFEST['version']}", docker)
         self.assertEqual(re.findall(r"ARG WEBUI_REF=(r\d+)", docker), [pins["WEBUI_REF"]] * 2)
@@ -403,8 +404,10 @@ class SuwayomiTests(unittest.TestCase):
     def test_build_applies_only_the_explicit_approved_overlays(self):
         docker = (APP / "Dockerfile").read_text()
         self.assertNotIn("chapter-page-list.patch", docker)
-        self.assertIn("COPY bundled-webui-version.patch scoped-manga-cancellation.patch /source/", docker)
-        self.assertIn("git apply --check bundled-webui-version.patch scoped-manga-cancellation.patch", docker)
+        overlays = "bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch"
+        self.assertIn("COPY " + overlays + " /source/", docker)
+        self.assertIn("git apply --check " + overlays, docker)
+        self.assertIn("&& git apply " + overlays, docker)
         self.assertNotIn("ChapterTest", docker)
         self.assertIn("chapter-page-list.patch", (APP / ".dockerignore").read_text().splitlines())
         cancellation = (APP / "scoped-manga-cancellation.patch").read_text()
