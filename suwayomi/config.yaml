@@ -1,6 +1,6 @@
 name: "Suwayomi Server"
 description: "Unofficial Suwayomi Server repackaging for Home Assistant, with ingress and configurable storage"
-version: "0.1.12"
+version: "0.1.13"
 slug: "suwayomi"
 url: "https://github.com/devnagui/Suwayomi-Server-HA"
 arch:
