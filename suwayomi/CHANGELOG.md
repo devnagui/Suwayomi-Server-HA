@@ -6,8 +6,10 @@
   preventing null URLs from reaching extensions' page-start callbacks.
 - Apply the same main-frame contract to page-finish notifications; report
   missing URLs without inventing a URL or successful page load.
-- Run eight focused AndroidCompat JVM regressions during both image builds
-  and include the overlay and its SHA-256 in packaged provenance.
+- Backport the canonical renderer-exit API implementation from upstream PR
+  #2535, avoiding an unavailable or throwing Android stub.
+- Run focused AndroidCompat JVM regressions during both image builds and
+  include the overlay and its SHA-256 in packaged provenance.
 - Preserve the existing server/WebUI pins, authentication, storage and
   resource settings. Source-specific empty chapters remain separate failures.
 

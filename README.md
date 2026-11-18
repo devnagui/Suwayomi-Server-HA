@@ -165,6 +165,13 @@ of an invented URL or successful callback. Genuine `about:blank` URLs remain val
 Both page-start and page-finish callbacks use the snapshot. Focused AndroidCompat
 JVM regressions run during each image build; native CEF gates remain required.
 This repair does not turn an empty chapter page list into a valid download.
+The same overlay backports upstream [PR #2535](https://github.com/Suwayomi/Suwayomi-Server/pull/2535)
+(`551cb073bb5bb32a6c6f0d39d36cfd2ef634cde9`): the canonical AOSP
+`RenderProcessGoneDetail` implementation, including its Apache-2.0 notice.
+The pinned source references this API but does not supply the class itself.
+Providing the real source avoids reliance on an unavailable or throwing Android
+stub; regression tests construct both killed/crashed renderer details without
+removing renderer-termination reporting or changing Gradle task ordering.
 
 Server updates shown inside Suwayomi refer to upstream server releases, not HA
 app releases; install the tested HA image instead of downloading/replacing its
