@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.13
+
+- Backport upstream PR #2517 (`9017f68f3815db6e1804ed3f5712f5e6f2b6a1ff`)
+  so Android WebView JavaScript evaluation returns multiline script completion
+  values as JSON, retaining null/error handling and non-awaiting promise behavior.
+- Include all required client-disposal and WebSocket-title callsite changes,
+  canonical AndroidCompat conversion regressions, and patch/hash provenance.
+- Demonstrate the exact AllManga multiline true/false predicate against the
+  removed wrapper and an ECMAScript completion reference. Keep the JavaScript
+  message-hook fixture separate; neither is a native extension-provider test.
+- Preserve navigation snapshots, renderer-exit API, pins, timeouts, authentication
+  and storage settings. Correct predicate evaluation is not proof of a working
+  source download or that a website challenge exists.
+- Require the existing native architecture gates before release; the gated
+  packaging workflow prepares and publishes the version metadata.
+
 ## 0.1.12
 
 - Capture CEF main-frame navigation URLs before Android Handler dispatch,

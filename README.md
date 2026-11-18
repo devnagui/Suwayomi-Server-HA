@@ -173,6 +173,29 @@ Providing the real source avoids reliance on an unavailable or throwing Android
 stub; regression tests construct both killed/crashed renderer details without
 removing renderer-termination reporting or changing Gradle task ordering.
 
+The 0.1.13 compatibility overlay `android-evaluation-semantics.patch` backports upstream
+[PR #2517](https://github.com/Suwayomi/Suwayomi-Server/pull/2517)
+(`9017f68f3815db6e1804ed3f5712f5e6f2b6a1ff`) and its required callsites/tests.
+It replaces the function-body evaluation heuristic with Android-style script
+completion via DevTools `Runtime.evaluate`. AllManga's multiline boolean poll
+can then report true/false instead of always null; this conditionally restores
+its detection logic, not proof of a website challenge or a repaired download.
+No source timeout is increased. Images are published only after both native
+architecture gates pass.
+
+`node --test tests/evaluation_completion.test.cjs` exercises the removed wrapper,
+the exact AllManga predicate and an ECMAScript reference, with a separate
+JavaScript message-hook check. These are not native/provider tests. Canonical
+`KcefEvaluationTest` exercises production completion-response conversion in the
+image build. `HAAllMangaEvaluationTest` passes the exact predicate's actual
+GraalJS completion through that production converter, without claiming native
+CDP/provider coverage. Existing native CEF smoke gates exercise the WebSocket renderer,
+not the extension's Android WebView provider or its native message bridge.
+An actual provider fixture is not added: the current harness has no such entry
+point, and this repair adds no public testing endpoint or SDK dependencies.
+Verify native provider/bridge behavior and actual source downloads on the target
+before declaring a source repaired.
+
 Server updates shown inside Suwayomi refer to upstream server releases, not HA
 app releases; install the tested HA image instead of downloading/replacing its
 JAR. On November 2, 2026, `v2.4.2476` is a genuine upgrade from `v2.4.2435`;

@@ -13,6 +13,7 @@ SERVER_PATCHES = (
     "bundled-webui-version.patch",
     "scoped-manga-cancellation.patch",
     "webview-navigation-snapshot.patch",
+    "android-evaluation-semantics.patch",
 )
 
 

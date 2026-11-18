@@ -300,6 +300,13 @@ class SuwayomiTests(unittest.TestCase):
         for name in ("run.py", "build_source.py"):
             ast.parse((APP / name).read_text(encoding="utf-8"))
 
+    def test_javascript_completion_reference_and_legacy_wrapper_regressions(self):
+        result = subprocess.run(
+            ["node", "--test", str(ROOT / "tests" / "evaluation_completion.test.cjs")],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_manifest_contract(self):
         self.assertEqual(set(MANIFEST["options"]), set(MANIFEST["schema"]))
         self.assertEqual(set(MANIFEST["arch"]), {"aarch64", "amd64"})
@@ -334,6 +341,8 @@ class SuwayomiTests(unittest.TestCase):
         self.assertIn("--tests suwayomi.tachidesk.graphql.UpdateMutationTest", docker)
         self.assertIn("--tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest", docker)
         self.assertIn(":AndroidCompat:test --tests xyz.nulldev.androidcompat.webkit.KcefNavigationSnapshotTest", docker)
+        self.assertIn("--tests xyz.nulldev.androidcompat.webkit.KcefEvaluationTest", docker)
+        self.assertIn("--tests xyz.nulldev.androidcompat.webkit.HAAllMangaEvaluationTest", docker)
         self.assertIn("git rev-parse HEAD", docker)
         self.assertIn(f"ARG BUILD_VERSION={MANIFEST['version']}", docker)
         self.assertEqual(re.findall(r"ARG WEBUI_REF=(r\d+)", docker), [pins["WEBUI_REF"]] * 2)
@@ -404,7 +413,8 @@ class SuwayomiTests(unittest.TestCase):
     def test_build_applies_only_the_explicit_approved_overlays(self):
         docker = (APP / "Dockerfile").read_text()
         self.assertNotIn("chapter-page-list.patch", docker)
-        overlays = "bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch"
+        overlays = ("bundled-webui-version.patch scoped-manga-cancellation.patch "
+                    "webview-navigation-snapshot.patch android-evaluation-semantics.patch")
         self.assertIn("COPY " + overlays + " /source/", docker)
         self.assertIn("git apply --check " + overlays, docker)
         self.assertIn("&& git apply " + overlays, docker)
