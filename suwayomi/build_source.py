@@ -14,6 +14,7 @@ SERVER_PATCHES = (
     "scoped-manga-cancellation.patch",
     "webview-navigation-snapshot.patch",
     "android-evaluation-semantics.patch",
+    "ci-github-metadata.patch",
 )
 
 

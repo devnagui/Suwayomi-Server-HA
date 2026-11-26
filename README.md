@@ -144,6 +144,13 @@ instead of hiding the assertion behind a generic exit code.
 Runtime WebUI failures report their actual update state; the bounded 300-line
 container failure log retains initial download errors even after intentional
 authentication-rejection checks have produced their own stack traces.
+CI-only `HA_CI_GITHUB_TOKEN` authenticates CEF and preview-WebUI release metadata
+against HTTPS `api.github.com:443`, avoiding the unauthenticated quota shared
+by hosted runner IPs. Only smoke steps receive the ephemeral workflow token;
+Docker forwards its environment name, never a token value in command arguments,
+and failure output redacts it. It is not a build argument, image layer or HA
+option. Without that CI environment variable, production behavior is unchanged.
+Raw mapping files and redirected binary downloads never receive this header.
 Preparation checks the complete approved overlay set against the exact selected
 server commit before either architecture starts. Docker uses that same helper
 and still checks before applying; an incompatible patch remains a hard failure,

@@ -147,6 +147,30 @@ class SuwayomiTests(unittest.TestCase):
         self.assertEqual(output.call_args.kwargs["timeout"], 180)
         self.assertNotIn("private-access", str(error.exception))
 
+    def test_ci_github_metadata_credentials_are_runtime_only_and_redacted(self):
+        smoke_spec = importlib.util.spec_from_file_location("ci_metadata_smoke", ROOT / "tests" / "suwayomi_smoke.py")
+        smoke = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke)
+        with patch.dict(smoke.os.environ, {}, clear=True):
+            self.assertEqual(smoke.ci_github_environment(), [])
+        with patch.dict(smoke.os.environ, {"HA_CI_GITHUB_TOKEN": "private-ci-fixture"}, clear=True):
+            self.assertEqual(smoke.ci_github_environment(), ["--env", "HA_CI_GITHUB_TOKEN"])
+            self.assertEqual(smoke.redact("failure private-ci-fixture"), "failure <redacted>")
+        with patch.dict(smoke.os.environ, {"HA_CI_GITHUB_TOKEN": ""}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "HA_CI_GITHUB_TOKEN is empty"):
+                smoke.ci_github_environment()
+        workflow = yaml.load((ROOT / ".github" / "workflows" / "suwayomi.yml").read_text(), Loader=yaml.BaseLoader)
+        build = workflow["jobs"]["build"]
+        self.assertNotIn("HA_CI_GITHUB_TOKEN", build.get("env", {}))
+        for step in build["steps"]:
+            if "suwayomi_smoke.py" in step.get("run", ""):
+                self.assertEqual(step["env"]["HA_CI_GITHUB_TOKEN"], "${{ secrets.GITHUB_TOKEN }}")
+            else:
+                self.assertNotIn("HA_CI_GITHUB_TOKEN", step.get("env", {}))
+        docker = (APP / "Dockerfile").read_text()
+        self.assertNotIn("HA_CI_GITHUB_TOKEN", docker)
+        self.assertIn("--tests suwayomi.tachidesk.server.util.HAGithubMetadataRequestTest", docker)
+
     def test_cef_probe_accepts_jpeg_frames_but_still_requires_real_javascript(self):
         probe_spec = importlib.util.spec_from_file_location("native_cef_probe", ROOT / "tests" / "suwayomi_probe.py")
         probe = importlib.util.module_from_spec(probe_spec)
@@ -389,6 +413,7 @@ class SuwayomiTests(unittest.TestCase):
         self.assertIn(":server:test --tests suwayomi.tachidesk.manga.impl.update.UpdaterTest", docker)
         self.assertIn("--tests suwayomi.tachidesk.graphql.UpdateMutationTest", docker)
         self.assertIn("--tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest", docker)
+        self.assertIn("--tests suwayomi.tachidesk.server.util.HAGithubMetadataRequestTest", docker)
         self.assertIn(":AndroidCompat:test --tests xyz.nulldev.androidcompat.webkit.KcefNavigationSnapshotTest", docker)
         self.assertIn("--tests xyz.nulldev.androidcompat.webkit.KcefEvaluationTest", docker)
         self.assertIn("--tests xyz.nulldev.androidcompat.webkit.HAAllMangaEvaluationTest", docker)
@@ -463,7 +488,7 @@ class SuwayomiTests(unittest.TestCase):
         docker = (APP / "Dockerfile").read_text()
         self.assertNotIn("chapter-page-list.patch", docker)
         overlays = ("bundled-webui-version.patch scoped-manga-cancellation.patch "
-                    "webview-navigation-snapshot.patch android-evaluation-semantics.patch")
+                    "webview-navigation-snapshot.patch android-evaluation-semantics.patch ci-github-metadata.patch")
         self.assertIn("COPY " + overlays + " /source/", docker)
         self.assertIn("python3 /source/build_source.py --apply-patches /source", docker)
         self.assertNotIn("ChapterTest", docker)

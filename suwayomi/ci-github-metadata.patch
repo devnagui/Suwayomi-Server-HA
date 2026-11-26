@@ -1,0 +1,101 @@
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/server/util/CEFManager.kt b/server/src/main/kotlin/suwayomi/tachidesk/server/util/CEFManager.kt
+index cbf50f8..c8c0006 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/server/util/CEFManager.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/server/util/CEFManager.kt
+@@ -244,9 +244,8 @@ object CEFManager {
+ 
+         val client = OkHttpClient.Builder().followRedirects(true).build()
+         val request =
+-            Request
+-                .Builder()
+-                .url("https://api.github.com/repos/JetBrains/JetBrainsRuntime/releases/tags/${BuildConfig.JCEF_JBR_RELEASE}")
++            githubMetadataRequest("https://api.github.com/repos/JetBrains/JetBrainsRuntime/releases/tags/${BuildConfig.JCEF_JBR_RELEASE}")
++                .newBuilder()
+                 .addHeader("Content-Type", GithubReleaseTransform.GITHUB_JSON)
+                 .build()
+ 
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/server/util/HAGithubMetadataRequest.kt b/server/src/main/kotlin/suwayomi/tachidesk/server/util/HAGithubMetadataRequest.kt
+new file mode 100644
+index 0000000..29ab5d8
+--- /dev/null
++++ b/server/src/main/kotlin/suwayomi/tachidesk/server/util/HAGithubMetadataRequest.kt
+@@ -0,0 +1,22 @@
++package suwayomi.tachidesk.server.util
++
++import eu.kanade.tachiyomi.network.GET
++import okhttp3.Request
++
++internal fun githubMetadataRequest(
++    url: String,
++    token: String? = System.getenv("HA_CI_GITHUB_TOKEN"),
++): Request {
++    val request = GET(url)
++    if (token == null) return request
++    require(token.isNotEmpty() && token.all { it.code in 33..126 }) {
++        "Invalid CI GitHub metadata token"
++    }
++    if (request.url.scheme != "https" || request.url.host != "api.github.com" || request.url.port != 443) {
++        return request
++    }
++    return request.newBuilder()
++        .header("Authorization", "Bearer $token")
++        .header("Cache-Control", "no-store")
++        .build()
++}
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt b/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt
+index 05ba165..8649e77 100644
+--- a/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/server/util/WebInterfaceManager.kt
+@@ -609,7 +609,7 @@ object WebInterfaceManager {
+                 {
+                     val releaseInfoJson =
+                         network.client
+-                            .newCall(GET(flavor.latestReleaseInfoUrl))
++                            .newCall(githubMetadataRequest(flavor.latestReleaseInfoUrl))
+                             .awaitSuccess()
+                             .body
+                             .string()
+diff --git a/server/src/test/kotlin/suwayomi/tachidesk/server/util/HAGithubMetadataRequestTest.kt b/server/src/test/kotlin/suwayomi/tachidesk/server/util/HAGithubMetadataRequestTest.kt
+new file mode 100644
+index 0000000..07a0592
+--- /dev/null
++++ b/server/src/test/kotlin/suwayomi/tachidesk/server/util/HAGithubMetadataRequestTest.kt
+@@ -0,0 +1,38 @@
++package suwayomi.tachidesk.server.util
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFailsWith
++import kotlin.test.assertNull
++
++class HAGithubMetadataRequestTest {
++    @Test
++    fun metadataAuthenticationIsOptInAndLimitedToTheCanonicalHttpsApi() {
++        val url = "https://api.github.com/repos/example/example/releases/latest"
++        assertNull(githubMetadataRequest(url, null).header("Authorization"))
++        assertEquals("Bearer fixture-only", githubMetadataRequest(url, "fixture-only").header("Authorization"))
++        assertEquals("no-store", githubMetadataRequest(url, "fixture-only").header("Cache-Control"))
++        for (external in
++            listOf(
++                "http://api.github.com/repos/example/example",
++                "https://api.github.com:8443/repos/example/example",
++                "https://api.github.com.example.org/repos/example/example",
++                "https://raw.githubusercontent.com/example/example/master/mapping.json",
++                "https://release-assets.githubusercontent.com/fixture",
++            )
++        ) {
++            assertNull(githubMetadataRequest(external, "fixture-only").header("Authorization"))
++        }
++    }
++
++    @Test
++    fun malformedTokensFailWithoutIncludingTheirValueInTheError() {
++        for (invalid in listOf("", "private fixture", "private\nfixture", "private\u007ffixture")) {
++            val error =
++                assertFailsWith<IllegalArgumentException> {
++                    githubMetadataRequest("https://api.github.com/repos/example/example", invalid)
++                }
++            assertEquals("Invalid CI GitHub metadata token", error.message)
++        }
++    }
++}
