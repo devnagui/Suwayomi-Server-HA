@@ -31,7 +31,7 @@ RUN python3 /source/build_source.py /source /output "$WEBUI_REF" "$WEBUI_SHA256"
 FROM eclipse-temurin:25-jre-noble
 ARG SOURCE_REF=4081b05f02456ec099c85127dfa5253e968d48a7
 ARG WEBUI_REF=r3601
-ARG BUILD_VERSION=0.1.14
+ARG BUILD_VERSION=0.1.13
 ARG BUILD_ARCH=amd64
 LABEL org.opencontainers.image.source="https://github.com/devnagui/Suwayomi-Server-HA" \
     org.opencontainers.image.licenses="MPL-2.0" \

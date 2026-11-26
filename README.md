@@ -131,6 +131,11 @@ uses only the coroutine import context and qualified verification calls.
 The 0.1.14 candidate pins upstream `4081b05f02456ec099c85127dfa5253e968d48a7`,
 rebases navigation callbacks around its new preload/document-script behavior,
 and removes backports now supplied by upstream while retaining their regressions.
+Keep the committed HA version at the last published value while integrating
+source fixes. Packaging-only publication uses a newer `release_version` with
+`update_upstream: false`; the workflow promotes both tested images before
+recording the new version. Source fixes must not advertise an HA update before
+its image tags exist.
 The newer upstream WebView also streams binary JPEG screenshots. The native
 smoke client validates and acknowledges those frames, including fragmentation
 and interleaved pings; the real JavaScript console result is still required.
