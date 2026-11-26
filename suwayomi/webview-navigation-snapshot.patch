@@ -1,23 +1,31 @@
 diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
 --- a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
 +++ b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
-@@ -262,9 +262,12 @@
+@@ -369,8 +369,12 @@
              frame: CefFrame,
              httpStatusCode: Int,
          ) {
--            val url = frame.url ?: ""
--            Log.v(TAG, "Load end $url")
--            handler.post {
 +            val navigation =
 +                KcefNavigationSnapshot.capture(frame.isMain, { frame.url }) {
 +                    Log.w(TAG, "Skipping page-finished callback: missing native navigation URL")
 +                }
-+            Log.v(TAG, "Load end")
-+            navigation?.post({ handler.post(it) }) { url ->
-                 if (httpStatusCode == 404) {
-                     viewClient.onReceivedError(
-                         view,
-@@ -309,6 +312,10 @@
+             val url = frame.url ?: ""
+             val isMain = frame.isMain // preserve, since it may not be valid in handler anymore
+             Log.d(TAG, "Load end $url (is main frame? $isMain)")
+             if (url == PRELOAD_PAGE) return
+
+@@ -398,8 +402,8 @@
+                     // TODO: create request and response
+                     // viewClient.onReceivedHttpError(_view, ...);
+                 }
+-                if (isMain) {
+-                    viewClient.onPageFinished(view, url)
++                navigation?.post({ it.run() }) { capturedUrl ->
++                    viewClient.onPageFinished(view, capturedUrl)
+                 }
+                 chromeClient.onProgressChanged(view, 100)
+             }
+@@ -424,8 +428,12 @@
              frame: CefFrame,
              transitionType: CefRequest.TransitionType,
          ) {
@@ -25,14 +33,17 @@ diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWe
 +                KcefNavigationSnapshot.capture(frame.isMain, { frame.url }) {
 +                    Log.w(TAG, "Skipping page-started callback: missing native navigation URL")
 +                }
+             val url = frame.url ?: ""
+             if (url == PRELOAD_PAGE) return
              Log.v(TAG, "Load start, pushing mappings")
              mappings.forEach {
                  val js =
-@@ -333,7 +340,7 @@
-                 browser.executeJavaScript(js, "SUWAYOMI ${it.toNice()}", 0)
-             }
+@@ -452,8 +460,6 @@
 
--            handler.post { viewClient.onPageStarted(view, frame.url, null) }
+             // "This method is called once for each main frame load so a page with iframes or framesets will call onPageStarted one time for the main frame"
+-            if (frame.isMain) {
+-                handler.post { viewClient.onPageStarted(view, url, null) }
+-            }
 +            navigation?.post({ handler.post(it) }) { url -> viewClient.onPageStarted(view, url, null) }
          }
      }
@@ -74,64 +85,6 @@ new file mode 100644
 +            return KcefNavigationSnapshot(url)
 +        }
 +    }
-+}
-diff --git a/AndroidCompat/src/main/java/android/webkit/RenderProcessGoneDetail.java b/AndroidCompat/src/main/java/android/webkit/RenderProcessGoneDetail.java
-new file mode 100644
---- /dev/null
-+++ b/AndroidCompat/src/main/java/android/webkit/RenderProcessGoneDetail.java
-@@ -0,0 +1,53 @@
-+/*
-+ * Copyright (C) 2016 The Android Open Source Project
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *      http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+
-+package android.webkit;
-+
-+/**
-+ * This class provides more specific information about why the render process
-+ * exited. The application may use this to decide how to handle the situation.
-+ **/
-+public abstract class RenderProcessGoneDetail {
-+    /**
-+     * @deprecated This class should not be constructed by applications.
-+     */
-+    // TODO(ntfschr): mark this as @SystemApi after a year.
-+    @Deprecated
-+    public RenderProcessGoneDetail() {}
-+
-+    /**
-+     * Indicates whether the render process was observed to crash, or whether
-+     * it was killed by the system.
-+     *
-+     * If the render process was killed, this is most likely caused by the
-+     * system being low on memory.
-+     *
-+     * @return {@code true} if render process crashed, otherwise it was killed by
-+     *         system.
-+     **/
-+    public abstract boolean didCrash();
-+
-+    /**
-+     * Returns the renderer priority that was set at the time that the
-+     * renderer exited.  This may be greater than the priority that
-+     * any individual {@link WebView} requested using
-+     * {@link WebView#setRendererPriorityPolicy}.
-+     *
-+     * @return the priority of the renderer at exit.
-+     **/
-+    @WebView.RendererPriority
-+    public abstract int rendererPriorityAtExit();
 +}
 diff --git a/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshotTest.kt b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefNavigationSnapshotTest.kt
 new file mode 100644

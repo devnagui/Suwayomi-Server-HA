@@ -1,0 +1,460 @@
+# Historical 0.1.13 overlay, retained only for legacy JavaScript regressions.
+diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/CefHelper.kt b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/CefHelper.kt
+--- a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/CefHelper.kt
++++ b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/CefHelper.kt
+@@ -17,12 +17,7 @@
+     @Volatile
+     var requestStart: () -> Unit = {}
+
+-    suspend fun createClient(): CefClient {
+-        val app = waitForInit().first()
+-        val client = app.createClient()
+-        JsHandler(client) // This adds itself to a global map
+-        return client
+-    }
++    suspend fun createClient(): CefClient = waitForInit().first().createClient()
+
+     fun waitForInit() =
+         callbackFlow {
+diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefHelper.kt b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefHelper.kt
+--- a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefHelper.kt
++++ b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefHelper.kt
+@@ -1,159 +1,71 @@
+ package xyz.nulldev.androidcompat.webkit
+
+ import io.github.oshai.kotlinlogging.KotlinLogging
+-import kotlinx.serialization.Serializable
+ import kotlinx.serialization.json.Json
+ import kotlinx.serialization.json.JsonNull
+ import kotlinx.serialization.json.JsonPrimitive
+-import org.cef.CefClient
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.put
+ import org.cef.browser.CefBrowser
+-import org.cef.browser.CefFrame
+-import org.cef.browser.CefMessageRouter
+-import org.cef.callback.CefQueryCallback
+-import org.cef.handler.CefMessageRouterHandlerAdapter
+-import java.util.Collections
+-import java.util.WeakHashMap
+-import java.util.concurrent.ConcurrentHashMap
+-import kotlin.random.Random
+
+ private val logger = KotlinLogging.logger {}
+-private val jsHandler: MutableMap<CefClient, JsHandler> = Collections.synchronizedMap(WeakHashMap())
+
+-// Passes the result serialized as JSON, like Android's WebView.evaluateJavascript
++/**
++ * Evaluates [script] in the main frame with Android's `WebView.evaluateJavascript` semantics:
++ * any script reports its completion value JSON-encoded, and "null" when it is undefined, the
++ * script throws, or the browser is not open. Like Android's, this does not wait for a promise and
++ * is exempt from the page's Content Security Policy.
++ */
+ fun CefBrowser.evaluateJavaScript(
+-    expression: String,
++    script: String,
+     cb: (String) -> Unit,
+-) = jsHandler[this.client]!!.eval(this, expression, cb)
++) {
++    val params =
++        buildJsonObject {
++            put("expression", script)
++            put("returnByValue", true)
++        }
++    // There is no client until the browser has been created, or once it is closing
++    val evaluation = devToolsClient?.executeDevToolsMethod("Runtime.evaluate", params.toString())
++    if (evaluation == null) {
++        cb("null")
++        return
++    }
++    evaluation
++        .handle { response, error ->
++            if (error != null) logger.debug(error) { "JavaScript evaluation failed" }
++            androidEvaluationResult(response)
++        }.thenAccept { cb(it) }
++}
+
+ // Passes the result decoded from JSON: a string arrives unquoted and null as null
+ fun CefBrowser.evaluateJavaScriptDecoded(
+-    expression: String,
++    script: String,
+     cb: (String?) -> Unit,
+-) = evaluateJavaScript(expression) { cb(JsHandler.plainValue(it)) }
++) = evaluateJavaScript(script) { cb(plainValue(it)) }
++
++/** Converts a DevTools `Runtime.evaluate` response to the value Android passes to its callback. */
++internal fun androidEvaluationResult(response: String?): String =
++    runCatching {
++        val evaluation = Json.parseToJsonElement(response!!).jsonObject
++        evaluation["result"]
++            ?.jsonObject
++            ?.get("value")
++            ?.takeUnless { "exceptionDetails" in evaluation }
++            ?.toString()
++    }.getOrNull() ?: "null"
++
++// A string's content, null, or the JSON text for any other value
++internal fun plainValue(json: String): String? =
++    when (val element = Json.parseToJsonElement(json)) {
++        is JsonNull -> null
++        is JsonPrimitive -> if (element.isString) element.content else json
++        else -> json
++    }
+
+ fun CefBrowser.dispose() {
+     stopLoad()
+     setCloseAllowed()
+     close(true)
+ }
+-
+-fun CefClient.disposeWithJsHandler() {
+-    jsHandler.remove(this)
+-    dispose()
+-}
+-
+-class JsHandler : CefMessageRouterHandlerAdapter {
+-    private val handler = ConcurrentHashMap<String, (String) -> Unit>()
+-
+-    constructor(client: CefClient) {
+-        val config = CefMessageRouter.CefMessageRouterConfig()
+-        config.jsQueryFunction = QUERY_FN
+-        config.jsCancelFunction = QUERY_CANCEL_FN
+-        client.addMessageRouter(CefMessageRouter.create(config, this))
+-        jsHandler[client] = this
+-    }
+-
+-    fun eval(
+-        frame: CefFrame,
+-        expression: String,
+-        cb: (String) -> Unit,
+-    ) {
+-        val id = Random.nextBytes(48).toHexString()
+-        handler[id] = cb
+-        frame.executeJavaScript(expression.toCode(id), "about:cef", 0)
+-    }
+-
+-    fun eval(
+-        browser: CefBrowser,
+-        expression: String,
+-        cb: (String) -> Unit,
+-    ) {
+-        val id = Random.nextBytes(48).toHexString()
+-        handler[id] = cb
+-        browser.executeJavaScript(expression.toCode(id), "about:cef", 0)
+-    }
+-
+-    override fun onQuery(
+-        browser: CefBrowser?,
+-        frame: CefFrame?,
+-        queryId: Long,
+-        request: String?,
+-        persistent: Boolean,
+-        callback: CefQueryCallback?,
+-    ): Boolean {
+-        super.onQuery(browser, frame, queryId, request, persistent, callback)
+-
+-        if (request != null) {
+-            val invoke =
+-                try {
+-                    Json.decodeFromString<FunctionCall>(request)
+-                } catch (e: Exception) {
+-                    logger.warn(e) { "Invalid request received" }
+-                    return false
+-                }
+-            val handler = handler.remove(invoke.id) ?: return false
+-            handler(invoke.result)
+-            callback?.success("")
+-            return true
+-        }
+-
+-        return false
+-    }
+-
+-    @Serializable
+-    internal data class FunctionCall(
+-        val id: String,
+-        // The result serialized as JSON
+-        val result: String,
+-    )
+-
+-    companion object {
+-        const val QUERY_FN = "__\$_evalQuery"
+-        const val QUERY_CANCEL_FN = "__\$_evalQueryCancel"
+-
+-        private fun Char.isLineBreak(): Boolean = this == '\n' || this == '\r'
+-
+-        private fun String.containsLineBreak(): Boolean =
+-            this.any {
+-                it.isLineBreak()
+-            }
+-
+-        private fun String.asFunctionBody(): String =
+-            let { expression ->
+-                when {
+-                    expression.containsLineBreak() -> expression
+-                    expression.trim().startsWith("return", false) -> expression
+-                    else -> "return $expression"
+-                }
+-            }
+-
+-        // A string's content, null, or the JSON text for any other value
+-        internal fun plainValue(json: String): String? =
+-            when (val element = Json.parseToJsonElement(json)) {
+-                is JsonNull -> null
+-                is JsonPrimitive -> if (element.isString) element.content else json
+-                else -> json
+-            }
+-
+-        internal fun String.toCode(id: String): String =
+-            """
+-            function payload() {
+-              ${this.asFunctionBody()}
+-            }
+-
+-            // Like Android's WebView, hand back the result serialized as JSON, and "null" when the script fails
+-            var result = undefined;
+-            try {
+-              result = JSON.stringify(payload());
+-            } catch (e) {
+-              console.error("Failed to eval $id", e)
+-            }
+-
+-            window.${QUERY_FN}({
+-                request: JSON.stringify({ id: "$id", result: result === undefined ? "null" : result }),
+-                onSuccess: function (response) {},
+-                onFailure: function (error_code, error_message) {}
+-            });
+-            """.trimIndent()
+-    }
+-}
+diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
+--- a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
++++ b/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefWebViewProvider.kt
+@@ -636,7 +636,7 @@
+         browser?.close(true)
+         browser?.dispose()
+         browser = null
+-        kcefClient?.disposeWithJsHandler()
++        kcefClient?.dispose()
+         kcefClient = null
+     }
+
+@@ -740,13 +740,10 @@
+         script: String,
+         resultCallback: ValueCallback<String>?,
+     ) {
+-        browser!!.evaluateJavaScript(
+-            script.removePrefix("javascript:"),
+-        )
+-            {
+-                Log.v(TAG, "JS returned: $it")
+-                handler.post { resultCallback?.onReceiveValue(it) }
+-            }
++        browser!!.evaluateJavaScript(script.removePrefix("javascript:")) {
++            Log.v(TAG, "JS returned: $it")
++            handler.post { resultCallback?.onReceiveValue(it) }
++        }
+     }
+
+     override fun saveWebArchive(filename: String): Unit = throw RuntimeException("Stub!")
+diff --git a/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/JsHandlerTest.kt b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/JsHandlerTest.kt
+deleted file mode 100644
+--- a/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/JsHandlerTest.kt
++++ /dev/null
+@@ -1,67 +0,0 @@
+-package xyz.nulldev.androidcompat.webkit
+-
+-import kotlinx.serialization.json.Json
+-import org.graalvm.polyglot.Context
+-import xyz.nulldev.androidcompat.webkit.JsHandler.Companion.toCode
+-import kotlin.test.Test
+-import kotlin.test.assertEquals
+-
+-class JsHandlerTest {
+-    /**
+-     * Runs the script [JsHandler] injects into the browser in a plain JS engine, with the CEF
+-     * message router replaced by a stub, and returns the result of the last [expressions] that
+-     * reaches Kotlin. The expressions run one after another in the same page.
+-     */
+-    private fun evaluate(vararg expressions: String): String =
+-        Context.create("js").use { context ->
+-            context.eval(
+-                "js",
+-                """
+-                var captured = null;
+-                var window = {
+-                  "${JsHandler.QUERY_FN}": function (query) { captured = query.request; },
+-                  "${JsHandler.QUERY_CANCEL_FN}": function (query) { captured = "cancel"; },
+-                };
+-                """.trimIndent(),
+-            )
+-            expressions.forEach { context.eval("js", it.toCode("test-id")) }
+-            val request = context.getBindings("js").getMember("captured").asString()
+-            val call = Json.decodeFromString<JsHandler.FunctionCall>(request)
+-            assertEquals("test-id", call.id)
+-            call.result
+-        }
+-
+-    @Test
+-    fun `string result is a JSON string literal, as on Android`() {
+-        assertEquals("\"Hello World\"", evaluate("\"Hello World\""))
+-    }
+-
+-    @Test
+-    fun `markup is escaped inside the JSON string`() {
+-        assertEquals("\"<div class=\\\"a\\\">\\n</div>\"", evaluate("'<div class=\"a\">\\n</div>'"))
+-    }
+-
+-    @Test
+-    fun `objects, numbers, booleans and null are JSON, as on Android`() {
+-        assertEquals("{\"id\":101,\"active\":true}", evaluate("({ id: 101, active: true })"))
+-        assertEquals("42", evaluate("42"))
+-        assertEquals("true", evaluate("true"))
+-        assertEquals("null", evaluate("null"))
+-        assertEquals("null", evaluate("undefined"))
+-    }
+-
+-    @Test
+-    fun `a script that throws or cannot be serialized yields null, as on Android`() {
+-        assertEquals("null", evaluate("missing.property"))
+-        assertEquals("null", evaluate("(function () { var a = {}; a.self = a; return a; })()"))
+-        assertEquals("null", evaluate("'earlier result'", "missing.property"))
+-    }
+-
+-    @Test
+-    fun `plain value decodes strings and null, and keeps other JSON as text`() {
+-        assertEquals("Hello World", JsHandler.plainValue("\"Hello World\""))
+-        assertEquals(null, JsHandler.plainValue("null"))
+-        assertEquals("42", JsHandler.plainValue("42"))
+-        assertEquals("{\"id\":101}", JsHandler.plainValue("{\"id\":101}"))
+-    }
+-}
+diff --git a/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefEvaluationTest.kt b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefEvaluationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/KcefEvaluationTest.kt
+@@ -0,0 +1,32 @@
++package xyz.nulldev.androidcompat.webkit
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class KcefEvaluationTest {
++    @Test
++    fun completionValuesAreJsonEncodedLikeAndroid() {
++        assertEquals("\"a\\\"b\"", androidEvaluationResult("""{"result":{"type":"string","value":"a\"b"}}"""))
++        assertEquals("{\"page\":[1,2]}", androidEvaluationResult("""{"result":{"type":"object","value":{"page":[1,2]}}}"""))
++        assertEquals("42", androidEvaluationResult("""{"result":{"type":"number","value":42,"description":"42"}}"""))
++    }
++
++    @Test
++    fun missingValuesAndErrorsReportNull() {
++        assertEquals("null", androidEvaluationResult("""{"result":{"type":"undefined"}}"""))
++        assertEquals("null", androidEvaluationResult("""{"result":{"type":"object","subtype":"null","value":null}}"""))
++        assertEquals(
++            "null",
++            androidEvaluationResult("""{"result":{"type":"object","value":{}},"exceptionDetails":{"text":"Uncaught"}}"""),
++        )
++        assertEquals("null", androidEvaluationResult(null))
++    }
++
++    @Test
++    fun plainValueDecodesStringsAndNullAndKeepsOtherJsonAsText() {
++        assertEquals("Hello World", plainValue("\"Hello World\""))
++        assertEquals(null, plainValue("null"))
++        assertEquals("42", plainValue("42"))
++        assertEquals("{\"id\":101}", plainValue("{\"id\":101}"))
++    }
++}
+diff --git a/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/HAAllMangaEvaluationTest.kt b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/HAAllMangaEvaluationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AndroidCompat/src/test/kotlin/xyz/nulldev/androidcompat/webkit/HAAllMangaEvaluationTest.kt
+@@ -0,0 +1,47 @@
++package xyz.nulldev.androidcompat.webkit
++
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.put
++import kotlinx.serialization.json.putJsonObject
++import org.graalvm.polyglot.Context
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++/**
++ * Real JS completion plus production response conversion, not native CDP/provider execution.
++ * Uses the existing polyglot dependency, as the replaced JsHandlerTest did.
++ */
++class HAAllMangaEvaluationTest {
++    @Test
++    fun exactAllMangaPredicateKeepsTrueAndFalseThroughProductionConversion() {
++        for ((titleMatch, overlayMatch, expected) in
++            listOf(
++                Triple(false, false, "false"),
++                Triple(true, false, "true"),
++                Triple(false, true, "true"),
++            )
++        ) {
++            Context.create("js").use { context ->
++                context.eval(
++                    "js",
++                    """
++                    var document = {
++                      title: ${if (titleMatch) "'Just a moment'" else "'ordinary page'"},
++                      querySelector: function () { return ${if (overlayMatch) "{}" else "null"}; }
++                    };
++                    """.trimIndent(),
++                )
++                val completion =
++                    context.eval(
++                        "js",
++                        """
++                        document.title.includes("Just a moment") ||
++                        document.querySelector('.captcha-overlay--visible') != null
++                        """.trimIndent(),
++                    )
++                val response = buildJsonObject { putJsonObject("result") { put("value", completion.asBoolean()) } }
++                assertEquals(expected, androidEvaluationResult(response.toString()))
++            }
++        }
++    }
++}
+diff --git a/server/src/main/kotlin/suwayomi/tachidesk/global/impl/KcefWebView.kt b/server/src/main/kotlin/suwayomi/tachidesk/global/impl/KcefWebView.kt
+--- a/server/src/main/kotlin/suwayomi/tachidesk/global/impl/KcefWebView.kt
++++ b/server/src/main/kotlin/suwayomi/tachidesk/global/impl/KcefWebView.kt
+@@ -24,8 +24,7 @@
+ import org.cef.network.CefCookieManager
+ import uy.kohesive.injekt.injectLazy
+ import xyz.nulldev.androidcompat.webkit.CefHelper
+ import xyz.nulldev.androidcompat.webkit.dispose
+-import xyz.nulldev.androidcompat.webkit.disposeWithJsHandler
+ import xyz.nulldev.androidcompat.webkit.evaluateJavaScriptDecoded
+ import java.awt.Component
+ import java.awt.HeadlessException
+@@ -165,7 +164,7 @@
+             url: String,
+         ) {
+             if (!frame.isMain) return
+-            this@KcefWebView.browser!!.evaluateJavaScriptDecoded("return document.title") {
++            this@KcefWebView.browser!!.evaluateJavaScriptDecoded("document.title") {
+                 WebView.notifyAllClients(
+                     Json.encodeToString<Event>(
+                         AddressEvent(url, it ?: ""),
+@@ -284,7 +283,7 @@
+         browser?.close(true)
+         browser?.dispose()
+         browser = null
+-        kcefClient?.disposeWithJsHandler()
++        kcefClient?.dispose()
+         kcefClient = null
+     }
+
+@@ -729,7 +728,7 @@
+         status: Int = 0,
+         error: String? = null,
+     ) {
+-        browser!!.evaluateJavaScriptDecoded("return document.title") {
++        browser!!.evaluateJavaScriptDecoded("document.title") {
+             logger.trace { "Load finished with title $it" }
+             WebView.notifyAllClients(
+                 Json.encodeToString<Event>(

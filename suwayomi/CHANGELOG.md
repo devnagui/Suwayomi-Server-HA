@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.14
+
+- Repackage upstream server `4081b05f02456ec099c85127dfa5253e968d48a7`
+  with SHA-256-pinned compatible WebUI `r3601`.
+- Rebase cancellation and navigation overlays against the current upstream;
+  preserve preload pages, document scripts and subframe progress/error events.
+- Remove duplicate renderer/evaluation backports now supplied by upstream,
+  retaining navigation, renderer-exit and AllManga completion regressions.
+- Check the exact candidate's approved patches before starting either native
+  architecture build, using the same fail-closed helper inside Docker.
+- Keep all build, CEF, browser, authentication and USB release gates required.
+  This candidate does not update or restart an installed Home Assistant app.
+
 ## 0.1.13
 
 - Backport upstream PR #2517 (`9017f68f3815db6e1804ed3f5712f5e6f2b6a1ff`)

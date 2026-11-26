@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 FROM --platform=$BUILDPLATFORM eclipse-temurin:25-jdk-noble AS builder
 
-ARG SOURCE_REF=7b061be09c9b62a89a63addd11ac91c40fc2510f
-ARG WEBUI_REF=r3578
-ARG WEBUI_SHA256=63e375b6a49dc3b418d8b9ea63e90d1741eca6c0989fe6456c7d51e2678d3746
+ARG SOURCE_REF=4081b05f02456ec099c85127dfa5253e968d48a7
+ARG WEBUI_REF=r3601
+ARG WEBUI_SHA256=9d254119aaff38b1058f9d1bec3bd0fc93f4e88369b0df380741a9f9367143c5
 ARG WEBUI_MIN_SERVER=2388
 RUN apt-get update && apt-get install -y --no-install-recommends git python3 \
     && rm -rf /var/lib/apt/lists/*
@@ -11,12 +11,11 @@ WORKDIR /source
 RUN git clone https://github.com/Suwayomi/Suwayomi-Server.git . \
     && git checkout --detach "$SOURCE_REF" \
     && test "$(git rev-parse HEAD)" = "$SOURCE_REF"
-COPY build_source.py /build_source.py
+COPY build_source.py /source/build_source.py
 COPY gradle_retry.py /gradle_retry.py
 COPY bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch android-evaluation-semantics.patch /source/
-RUN git apply --check bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch android-evaluation-semantics.patch \
-    && git apply bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch android-evaluation-semantics.patch
-RUN python3 /build_source.py --pin-webui /source "$WEBUI_REF" "$WEBUI_MIN_SERVER" "$WEBUI_SHA256"
+RUN python3 /source/build_source.py --apply-patches /source
+RUN python3 /source/build_source.py --pin-webui /source "$WEBUI_REF" "$WEBUI_MIN_SERVER" "$WEBUI_SHA256"
 RUN --mount=type=cache,target=/root/.gradle \
     cp .github/runner-files/ci-gradle.properties /root/.gradle/gradle.properties \
     && python3 /gradle_retry.py -- ./gradlew --no-daemon --max-workers=2 --init-script /source/ha-webui.gradle \
@@ -27,12 +26,12 @@ RUN --mount=type=cache,target=/root/.gradle \
        --tests suwayomi.tachidesk.graphql.UpdateMutationTest \
        --tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest \
        :server:downloadWebUI :server:shadowJar
-RUN python3 /build_source.py /source /output "$WEBUI_REF" "$WEBUI_SHA256"
+RUN python3 /source/build_source.py /source /output "$WEBUI_REF" "$WEBUI_SHA256"
 
 FROM eclipse-temurin:25-jre-noble
-ARG SOURCE_REF=7b061be09c9b62a89a63addd11ac91c40fc2510f
-ARG WEBUI_REF=r3578
-ARG BUILD_VERSION=0.1.13
+ARG SOURCE_REF=4081b05f02456ec099c85127dfa5253e968d48a7
+ARG WEBUI_REF=r3601
+ARG BUILD_VERSION=0.1.14
 ARG BUILD_ARCH=amd64
 LABEL org.opencontainers.image.source="https://github.com/devnagui/Suwayomi-Server-HA" \
     org.opencontainers.image.licenses="MPL-2.0" \

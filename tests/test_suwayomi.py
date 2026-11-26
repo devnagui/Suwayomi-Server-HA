@@ -416,8 +416,7 @@ class SuwayomiTests(unittest.TestCase):
         overlays = ("bundled-webui-version.patch scoped-manga-cancellation.patch "
                     "webview-navigation-snapshot.patch android-evaluation-semantics.patch")
         self.assertIn("COPY " + overlays + " /source/", docker)
-        self.assertIn("git apply --check " + overlays, docker)
-        self.assertIn("&& git apply " + overlays, docker)
+        self.assertIn("python3 /source/build_source.py --apply-patches /source", docker)
         self.assertNotIn("ChapterTest", docker)
         self.assertIn("chapter-page-list.patch", (APP / ".dockerignore").read_text().splitlines())
         cancellation = (APP / "scoped-manga-cancellation.patch").read_text()
@@ -425,6 +424,38 @@ class SuwayomiTests(unittest.TestCase):
         self.assertIn("UpdaterTest.kt", cancellation)
         self.assertIn("UpdateMutationTest.kt", cancellation)
         self.assertNotIn("ChapterForDownload", cancellation)
+
+    def test_patch_preflight_uses_the_build_overlays_and_never_applies_on_failure(self):
+        spec = importlib.util.spec_from_file_location("patch_builder", APP / "build_source.py")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        source = Path("candidate")
+        command = ["git", "-C", str(source), "apply"]
+        patches = [str(APP.resolve() / name) for name in builder.SERVER_PATCHES]
+        for check_only in (True, False):
+            with self.subTest(check_only=check_only), patch.object(builder.subprocess, "run") as run:
+                builder.apply_patches(source, check_only=check_only)
+                self.assertEqual(run.call_args_list[0], unittest.mock.call(
+                    [*command, "--check", *patches], check=True, timeout=60
+                ))
+                self.assertEqual(run.call_count, 1 if check_only else 2)
+                if not check_only:
+                    self.assertEqual(run.call_args_list[1], unittest.mock.call(
+                        [*command, *patches], check=True, timeout=60
+                    ))
+        with patch.object(builder.subprocess, "run", side_effect=subprocess.CalledProcessError(1, command)) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                builder.apply_patches(source)
+            self.assertEqual(run.call_count, 1)
+        workflow = yaml.load((ROOT / ".github" / "workflows" / "suwayomi.yml").read_text(), Loader=yaml.BaseLoader)
+        steps = workflow["jobs"]["prepare"]["steps"]
+        preflight = next(index for index, step in enumerate(steps)
+                         if "--check-patches" in step.get("run", ""))
+        archive = next(index for index, step in enumerate(steps)
+                       if step.get("name") == "Preserve the exact prepared source for both architectures")
+        self.assertLess(preflight, archive)
+        self.assertEqual(steps[preflight]["env"]["SOURCE_REF"], "${{ steps.pins.outputs.source }}")
+        self.assertEqual(steps[preflight]["if"], "steps.pins.outputs.build == 'true'")
 
     def test_daily_upstream_check_skips_unchanged_and_updates_changed_source(self):
         pins = yaml.safe_load((APP / "build.yaml").read_text())["args"]

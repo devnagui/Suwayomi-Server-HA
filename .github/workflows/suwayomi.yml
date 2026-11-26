@@ -113,6 +113,17 @@ jobs:
               for name, value in values.items():
                   output.write(f"{name}={value}\n")
           PY
+      - name: Check overlays against the exact candidate before starting either build
+        if: steps.pins.outputs.build == 'true'
+        env:
+          SOURCE_REF: ${{ steps.pins.outputs.source }}
+        run: |
+          git init "$RUNNER_TEMP/upstream"
+          git -C "$RUNNER_TEMP/upstream" fetch --depth=1 \
+            https://github.com/Suwayomi/Suwayomi-Server.git "$SOURCE_REF"
+          git -C "$RUNNER_TEMP/upstream" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/upstream" rev-parse HEAD)" = "$SOURCE_REF"
+          python suwayomi/build_source.py --check-patches "$RUNNER_TEMP/upstream"
       - name: Preserve the exact prepared source for both architectures
         if: steps.pins.outputs.build == 'true'
         run: tar --exclude=.git -czf "$RUNNER_TEMP/repackaging-source.tar.gz" .

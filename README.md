@@ -125,6 +125,17 @@ a failed release and needs inspection, never a successful fallback.
 
 ### Why a run can still fail
 
+The November 19-25 scheduled candidates failed because upstream added imports
+and already imported `coVerify` in `UpdaterTest.kt`. The cancellation overlay now
+uses only the coroutine import context and qualified verification calls.
+The 0.1.14 candidate pins upstream `4081b05f02456ec099c85127dfa5253e968d48a7`,
+rebases navigation callbacks around its new preload/document-script behavior,
+and removes backports now supplied by upstream while retaining their regressions.
+Preparation checks the complete approved overlay set against the exact selected
+server commit before either architecture starts. Docker uses that same helper
+and still checks before applying; an incompatible patch remains a hard failure,
+not a reason to drop the overlay or publish an untested update.
+
 The November 2026 failures had different causes: cancelled browser requests were
 mistaken for errors, a refreshed one-second test JWT could expire on ARM64, and
 an upstream Gradle dependency download returned HTTP 504. Old failure
@@ -139,8 +150,9 @@ so no workflow can guarantee every future run will succeed. The goal is bounded,
 reproducible checks and diagnostics that distinguish a real regression from a
 transient download failure, not retries of whole failed builds or skipped gates.
 
-The GitHub pipeline checks upstream master and compatible WebUI releases on
-pushes and daily at **04:15 UTC**. When either changes, the pipeline increments
+The GitHub pipeline checks upstream master and compatible WebUI releases daily
+at **04:15 UTC**, or on a manual run with `update_upstream` enabled.
+Pushes and pull requests test their committed pins. When either upstream pin changes, the pipeline increments
 the HA patch version, builds and tests both
 architectures, then publishes both images and records the tested source/version
 update. Failed candidates are not offered as a new HA version. Released image
@@ -165,13 +177,12 @@ of an invented URL or successful callback. Genuine `about:blank` URLs remain val
 Both page-start and page-finish callbacks use the snapshot. Focused AndroidCompat
 JVM regressions run during each image build; native CEF gates remain required.
 This repair does not turn an empty chapter page list into a valid download.
-The same overlay backports upstream [PR #2535](https://github.com/Suwayomi/Suwayomi-Server/pull/2535)
+The 0.1.13 overlay also backported upstream [PR #2535](https://github.com/Suwayomi/Suwayomi-Server/pull/2535)
 (`551cb073bb5bb32a6c6f0d39d36cfd2ef634cde9`): the canonical AOSP
 `RenderProcessGoneDetail` implementation, including its Apache-2.0 notice.
-The pinned source references this API but does not supply the class itself.
-Providing the real source avoids reliance on an unavailable or throwing Android
-stub; regression tests construct both killed/crashed renderer details without
-removing renderer-termination reporting or changing Gradle task ordering.
+The 0.1.14 server pin supplies this class itself, so the duplicate backport is
+removed. Regression tests still construct both killed/crashed renderer details
+without removing renderer-termination reporting or changing Gradle task ordering.
 
 The 0.1.13 compatibility overlay `android-evaluation-semantics.patch` backports upstream
 [PR #2517](https://github.com/Suwayomi/Suwayomi-Server/pull/2517)
@@ -182,6 +193,11 @@ can then report true/false instead of always null; this conditionally restores
 its detection logic, not proof of a website challenge or a repaired download.
 No source timeout is increased. Images are published only after both native
 architecture gates pass.
+
+In 0.1.14, upstream supplies the production evaluation implementation and
+`KcefEvaluationTest`; the overlay retains only `HAAllMangaEvaluationTest`.
+The original overlay is a [historical test fixture](tests/fixtures/legacy-android-evaluation-semantics.patch),
+not a patch applied to the newer server.
 
 `node --test tests/evaluation_completion.test.cjs` exercises the removed wrapper,
 the exact AllManga predicate and an ECMAScript reference, with a separate

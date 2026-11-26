@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const patch = fs.readFileSync(path.join(__dirname, '../suwayomi/android-evaluation-semantics.patch'), 'utf8');
+const patch = fs.readFileSync(path.join(__dirname, 'fixtures/legacy-android-evaluation-semantics.patch'), 'utf8');
 const helperDiff = patch.split('diff --git a/AndroidCompat/src/main/java/xyz/nulldev/androidcompat/webkit/KcefHelper.kt')[1]
   .split('\ndiff --git ')[0];
 const removedHelper = helperDiff.split('\n').filter(line => line.startsWith('-') && !line.startsWith('---'))
