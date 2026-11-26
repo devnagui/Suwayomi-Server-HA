@@ -136,6 +136,9 @@ smoke client validates and acknowledges those frames, including fragmentation
 and interleaved pings; the real JavaScript console result is still required.
 Failed Docker probes now include up to 6,000 characters of redacted output,
 instead of hiding the assertion behind a generic exit code.
+Runtime WebUI failures report their actual update state; the bounded 300-line
+container failure log retains initial download errors even after intentional
+authentication-rejection checks have produced their own stack traces.
 Preparation checks the complete approved overlay set against the exact selected
 server commit before either architecture starts. Docker uses that same helper
 and still checks before applying; an incompatible patch remains a hard failure,
