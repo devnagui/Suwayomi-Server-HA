@@ -40,6 +40,8 @@ jobs:
       image_base: ${{ steps.pins.outputs.image_base }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
@@ -124,6 +126,14 @@ jobs:
           git -C "$RUNNER_TEMP/upstream" checkout --detach FETCH_HEAD
           test "$(git -C "$RUNNER_TEMP/upstream" rev-parse HEAD)" = "$SOURCE_REF"
           python suwayomi/build_source.py --check-patches "$RUNNER_TEMP/upstream"
+      - name: Validate HA app manifest once on the prepared candidate
+        if: steps.pins.outputs.build == 'true'
+        uses: frenck/action-app-linter@v2
+        with:
+          path: suwayomi
+      - name: Verify packaging regressions once before native builds
+        if: steps.pins.outputs.build == 'true'
+        run: python -m unittest discover -s tests -p test_suwayomi.py
       - name: Preserve the exact prepared source for both architectures
         if: steps.pins.outputs.build == 'true'
         run: tar --exclude=.git -czf "$RUNNER_TEMP/repackaging-source.tar.gz" .
@@ -156,15 +166,10 @@ jobs:
           name: prepared-source
           path: ${{ runner.temp }}/prepared
       - run: mkdir -p build && tar -xzf "$RUNNER_TEMP/prepared/repackaging-source.tar.gz" -C build
-      - name: Validate HA app manifest
-        uses: frenck/action-app-linter@v2
-        with:
-          path: build/suwayomi
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -r build/tests/requirements-suwayomi.txt
-      - run: python -m unittest discover -s build/tests -p test_suwayomi.py
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
