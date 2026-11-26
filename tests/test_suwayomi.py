@@ -904,6 +904,87 @@ class SuwayomiTests(unittest.TestCase):
         java.wait.assert_called_once_with(timeout=45)
         display.wait.assert_called_once_with(timeout=45)
 
+    def test_cef_private_session_bus_waits_for_its_real_unix_address(self):
+        bus = unittest.mock.Mock()
+        bus.poll.return_value = None
+        runtime = Path("/run/suwayomi/auth")
+        address = f"unix:path={runtime / 'session-bus-0123456789abcdef'},guid=" + "a" * 32
+        with patch.object(runner.subprocess, "Popen", return_value=bus) as start, patch.object(
+            runner, "read_readiness_line", return_value=(address + "\n").encode()
+        ) as ready, patch.object(runner.secrets, "token_hex", return_value="0123456789abcdef"), patch.dict(
+            runner.os.environ, {"HA_CI_GITHUB_TOKEN": "private-ci-fixture"}
+        ):
+            child, configured = runner.start_session_bus(runtime)
+        self.assertIs(child, bus)
+        self.assertEqual(configured, address)
+        self.assertIn("--session", start.call_args.args[0])
+        self.assertIn("--nofork", start.call_args.args[0])
+        self.assertIn(f"--address=unix:path={runtime / 'session-bus-0123456789abcdef'}", start.call_args.args[0])
+        self.assertEqual(start.call_args.kwargs["user"], 1001)
+        self.assertEqual(start.call_args.kwargs["group"], 1001)
+        self.assertNotIn("HA_CI_GITHUB_TOKEN", start.call_args.kwargs["env"])
+        ready.assert_called_once_with(bus, "CEF private session bus", limit=512)
+        bus.stdout.close.assert_called_once()
+        self.assertIn("dbus-daemon", (APP / "Dockerfile").read_text())
+        code = (APP / "run.py").read_text()
+        self.assertLess(code.index("session_bus, address = start_session_bus"),
+                        code.index('java = subprocess.Popen(["java"'))
+        self.assertIn('environment["DBUS_SESSION_BUS_ADDRESS"] = address', code)
+        self.assertNotIn("DBUS_SESSION_BUS_ADDRESS=/dev/null", code)
+
+    def test_cef_private_bus_failure_is_explicit_and_closes_owned_child(self):
+        for reply in (b"unix:path=/wrong/socket\n", b"invalid\n"):
+            bus = unittest.mock.Mock()
+            bus.poll.return_value = None
+            with self.subTest(reply=reply), patch.object(runner.subprocess, "Popen", return_value=bus), patch.object(
+                runner, "read_readiness_line", return_value=reply
+            ), patch.object(runner, "stop_child") as stop:
+                with self.assertRaisesRegex(RuntimeError, "private session bus failed its readiness"):
+                    runner.start_session_bus(Path("/run/suwayomi/auth"))
+                stop.assert_called_once_with(bus)
+                bus.stdout.close.assert_called_once()
+        bus = unittest.mock.Mock()
+        with patch.object(runner.subprocess, "Popen", return_value=bus), patch.object(
+            runner, "read_readiness_line", side_effect=RuntimeError("CEF private session bus startup timeout")
+        ), patch.object(runner, "stop_child") as stop:
+            with self.assertRaisesRegex(RuntimeError, "startup timeout"):
+                runner.start_session_bus(Path("/run/suwayomi/auth"))
+            stop.assert_called_once_with(bus)
+            bus.stdout.close.assert_called_once()
+
+    def test_cef_session_bus_survives_until_the_direct_jvm_finishes(self):
+        events = []
+        java = unittest.mock.Mock()
+        display = unittest.mock.Mock()
+        bus = unittest.mock.Mock()
+        for name, child in (("java", java), ("display", display), ("bus", bus)):
+            child.poll.return_value = None
+            child.terminate.side_effect = lambda name=name: events.append(name + "-terminate")
+            child.wait.side_effect = lambda timeout=None, name=name: events.append(name + "-wait")
+        runner.shutdown_children([java], display, bus)
+        self.assertLess(events.index("java-wait"), events.index("bus-terminate"))
+        self.assertLess(events.index("java-wait"), events.index("display-terminate"))
+
+    def test_private_service_readiness_preserves_exact_byte_limits(self):
+        for limit in (64, 512):
+            child = unittest.mock.Mock()
+            selector = unittest.mock.MagicMock()
+            selector.__enter__.return_value = selector
+            selector.select.return_value = [(object(), 1)]
+            with self.subTest(limit=limit), patch.object(
+                runner.selectors, "DefaultSelector", return_value=selector
+            ), patch.object(runner.os, "read", side_effect=[b"x" * limit, b"x"]):
+                with self.assertRaisesRegex(RuntimeError, "invalid readiness response"):
+                    runner.read_readiness_line(child, "private service", limit=limit)
+
+    def test_bus_shutdown_failure_still_closes_the_owned_display(self):
+        bus = unittest.mock.Mock()
+        display = unittest.mock.Mock()
+        with patch.object(runner, "stop_child", side_effect=[RuntimeError("bus shutdown failed"), None]) as stop:
+            with self.assertRaisesRegex(RuntimeError, "bus shutdown failed"):
+                runner.shutdown_children([], display, bus)
+            self.assertEqual(stop.call_args_list, [unittest.mock.call(bus), unittest.mock.call(display)])
+
     def test_cef_probe_requires_javascript_not_only_a_websocket_or_load_event(self):
         spec = importlib.util.spec_from_file_location("suwayomi_cef_probe", ROOT / "tests" / "suwayomi_probe.py")
         probe = importlib.util.module_from_spec(spec)

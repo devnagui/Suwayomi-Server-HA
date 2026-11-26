@@ -18,6 +18,9 @@
 - Authenticate CEF/preview-WebUI GitHub metadata in CI with the ephemeral
   workflow token, scoped to HTTPS `api.github.com` on port 443. Keep the token
   out of image layers, app options and production defaults; retain all native gates.
+- Start a real private session D-Bus before the direct JVM when CEF is enabled,
+  avoiding headless D-Bus autolaunch during native initialization. Bound readiness,
+  supervise the daemon, and keep it alive until JVM shutdown hooks complete.
 
 ## 0.1.13
 
