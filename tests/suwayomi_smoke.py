@@ -334,6 +334,7 @@ def main() -> None:
                 "assert (p/'ingress-session.json').stat().st_mode & 0o777==0o600; "
                 "assert (p/'ingress-auth.sock').stat().st_mode & 0o777==0o600; "
                 "assert p.stat().st_uid==1001; "
+                f"assert len([s for s in p.glob('session-bus-*') if s.is_socket()])=={1 if arguments.cef else 0}; "
                 "assert 'Basic ' not in Path('/run/suwayomi/nginx.conf').read_text()")
             assert request(direct_url + "/")[0] == 200, "UI login must serve its page without Basic auth"
             for legacy_headers in (

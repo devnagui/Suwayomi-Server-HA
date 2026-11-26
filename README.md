@@ -151,6 +151,13 @@ Docker forwards its environment name, never a token value in command arguments,
 and failure output redacts it. It is not a build argument, image layer or HA
 option. Without that CI environment variable, production behavior is unchanged.
 Raw mapping files and redirected binary downloads never receive this header.
+ARM64 native trials also exposed the headless `getenv` crash described in
+[upstream issue #2170](https://github.com/Suwayomi/Suwayomi-Server/issues/2170).
+CEF-enabled startup now creates a real private session D-Bus before launching
+the directly supervised JVM, avoiding session-bus autolaunch during native
+initialization. It uses only an app-private Unix socket, not the host bus or
+a dummy address. Startup has a ten-second deadline, daemon exit is explicit,
+and the bus/display survive until JVM shutdown hooks finish.
 Preparation checks the complete approved overlay set against the exact selected
 server commit before either architecture starts. Docker uses that same helper
 and still checks before applying; an incompatible patch remains a hard failure,

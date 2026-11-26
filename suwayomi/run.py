@@ -265,6 +265,26 @@ def stop_child(child: subprocess.Popen) -> None:
         child.wait()
 
 
+def read_readiness_line(child: subprocess.Popen, service: str, limit: int = 64) -> bytes:
+    if child.stdout is None:
+        raise RuntimeError(f"{service} has no readiness pipe")
+    with selectors.DefaultSelector() as selector:
+        selector.register(child.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 10
+        ready = b""
+        while b"\n" not in ready:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise RuntimeError(f"{service} did not become ready within 10 seconds")
+            chunk = os.read(child.stdout.fileno(), limit)
+            if not chunk:
+                raise RuntimeError(f"{service} exited during startup")
+            ready += chunk
+            if len(ready) > limit:
+                raise RuntimeError(f"{service} returned an invalid readiness response")
+        return ready
+
+
 def start_display(runtime: Path) -> tuple[subprocess.Popen, dict[str, str]]:
     authority = runtime / "xauthority"
     private_file(authority, "", uid=1001, gid=1001)
@@ -282,40 +302,54 @@ def start_display(runtime: Path) -> tuple[subprocess.Popen, dict[str, str]]:
         stdout=subprocess.PIPE, user=1001, group=1001,
     )
     try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(display.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 10
-            ready = b""
-            while b"\n" not in ready:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    raise RuntimeError("CEF virtual display did not become ready within 10 seconds")
-                chunk = os.read(display.stdout.fileno(), 64)
-                if not chunk:
-                    raise RuntimeError("CEF virtual display exited during startup")
-                ready += chunk
-                if len(ready) > 64:
-                    raise RuntimeError("CEF virtual display returned an invalid readiness response")
-            if ready != b"99\n" or display.poll() is not None:
-                raise RuntimeError("CEF virtual display failed its readiness check")
+        ready = read_readiness_line(display, "CEF virtual display")
+        if ready != b"99\n" or display.poll() is not None:
+            raise RuntimeError("CEF virtual display failed its readiness check")
         return display, os.environ | {"DISPLAY": ":99", "XAUTHORITY": str(authority)}
     except (OSError, RuntimeError, ValueError):
         stop_child(display)
         raise
     finally:
-        display.stdout.close()
+        if display.stdout is not None:
+            display.stdout.close()
 
 
-def shutdown_children(children: list[subprocess.Popen], display: subprocess.Popen | None) -> None:
+def start_session_bus(runtime: Path) -> tuple[subprocess.Popen, str]:
+    address = f"unix:path={runtime / ('session-bus-' + secrets.token_hex(8))}"
+    bus = subprocess.Popen(
+        ["dbus-daemon", "--session", "--nofork", "--nopidfile", "--print-address=1", f"--address={address}"],
+        stdout=subprocess.PIPE, user=1001, group=1001,
+        env={key: value for key, value in os.environ.items() if key != "HA_CI_GITHUB_TOKEN"},
+    )
+    try:
+        ready = read_readiness_line(bus, "CEF private session bus", limit=512).decode("ascii")
+        if not re.fullmatch(re.escape(address) + r"(?:,guid=[0-9a-f]{32})?\n", ready) or bus.poll() is not None:
+            raise RuntimeError("CEF private session bus failed its readiness check")
+        return bus, ready.rstrip("\n")
+    except (OSError, RuntimeError, ValueError):
+        stop_child(bus)
+        raise
+    finally:
+        if bus.stdout is not None:
+            bus.stdout.close()
+
+
+def shutdown_children(
+    children: list[subprocess.Popen], display: subprocess.Popen | None, session_bus: subprocess.Popen | None = None
+) -> None:
     try:
         for child in children:
             terminate_child(child)
         for child in reversed(children):
             stop_child(child)
     finally:
-        # CEF needs its display while the JVM runs database and browser shutdown hooks.
-        if display is not None:
-            stop_child(display)
+        # CEF needs both services while the JVM runs browser and database shutdown hooks.
+        try:
+            if session_bus is not None:
+                stop_child(session_bus)
+        finally:
+            if display is not None:
+                stop_child(display)
 
 
 def prepare_webui(target: Path, packaged: Path = Path("/app/webui")) -> None:
@@ -486,6 +520,7 @@ def main() -> None:
     )
     children: list[subprocess.Popen] = []
     display = None
+    session_bus = None
     stopping = False
 
     def stop(_signum: int, _frame: Any) -> None:
@@ -500,6 +535,8 @@ def main() -> None:
         environment = os.environ.copy()
         if options["embedded_browser_enabled"]:
             display, environment = start_display(broker_runtime)
+            session_bus, address = start_session_bus(broker_runtime)
+            environment["DBUS_SESSION_BUS_ADDRESS"] = address
         if stopping:
             return
         java = subprocess.Popen(["java", "@" + str(runtime / "java.args")], user=1001, group=1001, env=environment)
@@ -531,6 +568,8 @@ def main() -> None:
         while not stopping:
             if display is not None and display.poll() is not None:
                 raise RuntimeError("CEF virtual display exited; inspect the preceding display error")
+            if session_bus is not None and session_bus.poll() is not None:
+                raise RuntimeError("CEF private session bus exited; inspect the preceding bus error")
             for child in children:
                 if child.poll() is not None:
                     raise RuntimeError("A required process exited; inspect the preceding server/proxy error")
@@ -550,7 +589,7 @@ def main() -> None:
             time.sleep(0.5)
     finally:
         stop(0, None)
-        shutdown_children(children, display)
+        shutdown_children(children, display, session_bus)
 
 
 if __name__ == "__main__":

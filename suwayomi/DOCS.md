@@ -145,9 +145,13 @@ It also exposes `webui_channel` and `webui_update_check_interval`.
   `jvm_heap_mb`; check available memory first on a 4 GiB Pi. Existing
   FlareSolverr settings, source concurrency and library storage remain unchanged.
 - The app runs an authenticated, non-networked Xvfb display as the
-  unprivileged server user. Java is supervised directly, and the display stays
-  alive until Java's browser/database shutdown hooks finish. Display failures
-  are explicit app failures, not silent fallback to disabled CEF.
+  unprivileged server user. CEF-enabled startup also creates a private session
+  D-Bus before Java to avoid headless native initialization races. It uses only
+  an app-private Unix socket, never the HA host bus or a new network port.
+  Java is supervised directly; the display and bus stay alive until Java's
+  browser/database shutdown hooks finish. Service readiness has a ten-second
+  deadline, and service exits are explicit app failures, not silent fallback
+  to disabled CEF. Neither service starts when CEF is disabled.
 - Earlier experiments intermittently failed category-persistence checks.
   The new native release gate must load local HTML, execute JavaScript, and
   verify the same administrator/category and real library after restart in
