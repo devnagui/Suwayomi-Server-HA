@@ -17,6 +17,14 @@ SERVER_PATCHES = (
 )
 
 
+def apply_patches(source: Path, check_only: bool = False) -> None:
+    patches = [str(Path(__file__).resolve().parent / name) for name in SERVER_PATCHES]
+    command = ["git", "-C", str(source), "apply"]
+    subprocess.run([*command, "--check", *patches], check=True, timeout=60)
+    if not check_only:
+        subprocess.run([*command, *patches], check=True, timeout=60)
+
+
 def pin_webui(source: Path, revision: str, minimum_server: int, digest: str) -> None:
     if not re.fullmatch(r"r\d+", revision) or minimum_server < 1 or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise SystemExit("Invalid pinned WebUI compatibility metadata")
@@ -110,7 +118,9 @@ def package(source: Path, output: Path, expected_webui: str | None = None, expec
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "--pin-webui":
+    if sys.argv[1] in ("--check-patches", "--apply-patches"):
+        apply_patches(Path(sys.argv[2]), check_only=sys.argv[1] == "--check-patches")
+    elif sys.argv[1] == "--pin-webui":
         pin_webui(Path(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5])
     else:
         package(Path(sys.argv[1]), Path(sys.argv[2]), *sys.argv[3:])

@@ -130,11 +130,15 @@ class SuwayomiTests(unittest.TestCase):
         self.assertIn("startup failure", output.getvalue())
         self.assertNotIn("private", output.getvalue())
         with patch.object(smoke.subprocess, "check_output", side_effect=subprocess.CalledProcessError(
-            1, ["docker", "exec", "--env", "TOKEN=private-access"], output="private-access"
+            1, ["docker", "exec", "--env", "TOKEN=private-access"],
+            output="AssertionError: native fixture failed " + text
         )):
             with self.assertRaisesRegex(RuntimeError, "exit code 1") as error:
                 smoke.docker("exec", "--env", "TOKEN=private-access")
         self.assertNotIn("private-access", str(error.exception))
+        self.assertNotIn(password, str(error.exception))
+        self.assertNotIn(json.dumps(password)[1:-1], str(error.exception))
+        self.assertIn("AssertionError: native fixture failed", str(error.exception))
         with patch.object(smoke.subprocess, "check_output", side_effect=subprocess.TimeoutExpired(
             ["docker", "exec", "--env", "TOKEN=private-access"], 180,
         )) as output:
@@ -142,6 +146,51 @@ class SuwayomiTests(unittest.TestCase):
                 smoke.docker("exec", "--env", "TOKEN=private-access")
         self.assertEqual(output.call_args.kwargs["timeout"], 180)
         self.assertNotIn("private-access", str(error.exception))
+
+    def test_cef_probe_accepts_jpeg_frames_but_still_requires_real_javascript(self):
+        probe_spec = importlib.util.spec_from_file_location("native_cef_probe", ROOT / "tests" / "suwayomi_probe.py")
+        probe = importlib.util.module_from_spec(probe_spec)
+        probe_spec.loader.exec_module(probe)
+
+        def frame(opcode, payload, final=True):
+            return bytes(((0x80 if final else 0) | opcode, len(payload))) + payload
+
+        console = json.dumps({"type": "consoleMessage", "message": "HA_CEF_JS_RESULT:42"}).encode()
+        jpeg = b"\xff\xd8fixture\xff\xd9"
+        for frames, error in (
+            (frame(2, jpeg) + frame(1, console), None),
+            (frame(2, jpeg[:4], False) + frame(9, b"ping") + frame(0, jpeg[4:]) +
+             frame(1, console[:5], False) + frame(0, console[5:]), None),
+            (frame(2, b"not a JPEG"), "not a JPEG"),
+            (frame(0, b"orphan"), "continuation without a message"),
+            (frame(1, b"{", False) + frame(2, jpeg), "interrupted a fragmented message"),
+            (frame(2, jpeg) + frame(8, b""), "closed before executing fixture JavaScript"),
+        ):
+            with self.subTest(error=error):
+                incoming = bytearray(b"HTTP/1.1 101 Switching Protocols\r\n\r\n" + frames)
+                connection = unittest.mock.MagicMock()
+                connection.__enter__.return_value = connection
+
+                def receive(length):
+                    data = bytes(incoming[:length])
+                    del incoming[:length]
+                    return data
+
+                connection.recv.side_effect = receive
+                with patch.object(probe.socket, "create_connection", return_value=connection), patch.dict(
+                    probe.os.environ, {"SUWAYOMI_TEST_TOKEN": "fixture-only"}
+                ), patch("sys.stdout", new_callable=io.StringIO) as output:
+                    if error:
+                        with self.assertRaisesRegex(RuntimeError, error):
+                            probe.cef_webview()
+                    else:
+                        probe.cef_webview()
+                        self.assertIn("executed JavaScript", output.getvalue())
+                        acknowledgement = connection.sendall.call_args_list[-1].args[0]
+                        self.assertEqual(acknowledgement[0], 0x81)
+                        mask = acknowledgement[2:6]
+                        payload = bytes(value ^ mask[index % 4] for index, value in enumerate(acknowledgement[6:]))
+                        self.assertEqual(json.loads(payload), {"type": "frameReceived"})
 
     def test_smoke_cleanup_attempts_all_resources_and_preserves_primary_failure(self):
         smoke_spec = importlib.util.spec_from_file_location("suwayomi_cleanup", ROOT / "tests" / "suwayomi_smoke.py")
@@ -416,8 +465,7 @@ class SuwayomiTests(unittest.TestCase):
         overlays = ("bundled-webui-version.patch scoped-manga-cancellation.patch "
                     "webview-navigation-snapshot.patch android-evaluation-semantics.patch")
         self.assertIn("COPY " + overlays + " /source/", docker)
-        self.assertIn("git apply --check " + overlays, docker)
-        self.assertIn("&& git apply " + overlays, docker)
+        self.assertIn("python3 /source/build_source.py --apply-patches /source", docker)
         self.assertNotIn("ChapterTest", docker)
         self.assertIn("chapter-page-list.patch", (APP / ".dockerignore").read_text().splitlines())
         cancellation = (APP / "scoped-manga-cancellation.patch").read_text()
@@ -425,6 +473,38 @@ class SuwayomiTests(unittest.TestCase):
         self.assertIn("UpdaterTest.kt", cancellation)
         self.assertIn("UpdateMutationTest.kt", cancellation)
         self.assertNotIn("ChapterForDownload", cancellation)
+
+    def test_patch_preflight_uses_the_build_overlays_and_never_applies_on_failure(self):
+        spec = importlib.util.spec_from_file_location("patch_builder", APP / "build_source.py")
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        source = Path("candidate")
+        command = ["git", "-C", str(source), "apply"]
+        patches = [str(APP.resolve() / name) for name in builder.SERVER_PATCHES]
+        for check_only in (True, False):
+            with self.subTest(check_only=check_only), patch.object(builder.subprocess, "run") as run:
+                builder.apply_patches(source, check_only=check_only)
+                self.assertEqual(run.call_args_list[0], unittest.mock.call(
+                    [*command, "--check", *patches], check=True, timeout=60
+                ))
+                self.assertEqual(run.call_count, 1 if check_only else 2)
+                if not check_only:
+                    self.assertEqual(run.call_args_list[1], unittest.mock.call(
+                        [*command, *patches], check=True, timeout=60
+                    ))
+        with patch.object(builder.subprocess, "run", side_effect=subprocess.CalledProcessError(1, command)) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                builder.apply_patches(source)
+            self.assertEqual(run.call_count, 1)
+        workflow = yaml.load((ROOT / ".github" / "workflows" / "suwayomi.yml").read_text(), Loader=yaml.BaseLoader)
+        steps = workflow["jobs"]["prepare"]["steps"]
+        preflight = next(index for index, step in enumerate(steps)
+                         if "--check-patches" in step.get("run", ""))
+        archive = next(index for index, step in enumerate(steps)
+                       if step.get("name") == "Preserve the exact prepared source for both architectures")
+        self.assertLess(preflight, archive)
+        self.assertEqual(steps[preflight]["env"]["SOURCE_REF"], "${{ steps.pins.outputs.source }}")
+        self.assertEqual(steps[preflight]["if"], "steps.pins.outputs.build == 'true'")
 
     def test_daily_upstream_check_skips_unchanged_and_updates_changed_source(self):
         pins = yaml.safe_load((APP / "build.yaml").read_text())["args"]

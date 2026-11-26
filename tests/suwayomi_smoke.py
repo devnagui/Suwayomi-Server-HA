@@ -50,7 +50,10 @@ def docker(*arguments: str) -> str:
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Docker {arguments[0]} exceeded its 180-second deadline (command details redacted)") from None
     except subprocess.CalledProcessError as error:
-        raise RuntimeError(f"Docker {arguments[0]} failed with exit code {error.returncode} (command details redacted)") from None
+        output = redact(error.output or "")[-6000:]
+        raise RuntimeError(
+            f"Docker {arguments[0]} failed with exit code {error.returncode} (command details redacted)\n{output}"
+        ) from None
 
 
 def print_failure_logs(name: str, lines: str) -> None:
@@ -419,7 +422,8 @@ def main() -> None:
                 }}}, "Bundled WebUI advertised a mismatched version or a false update"
             else:
                 assert re.fullmatch(r"r\d+", active["aboutWebUI"]["tag"]), "Runtime WebUI did not report a valid revision"
-                assert active["webUIUpdateStatus"]["state"] == "FINISHED", "Runtime UI download did not finish successfully"
+                state = active["webUIUpdateStatus"]["state"]
+                assert state == "FINISHED", f"Runtime UI download did not finish successfully (state={state})"
             print(f'PASS: backend {metadata["server_version"]}, active {arguments.webui_channel} WebUI {active["aboutWebUI"]["tag"]} and external FlareSolverr configuration', flush=True)
             if arguments.tls:
                 original = certificate_peer(int(direct_port), trusted)
@@ -587,7 +591,7 @@ def main() -> None:
         except (AssertionError, RuntimeError, subprocess.SubprocessError, urllib.error.URLError, ConnectionError,
                 KeyError, TypeError, ValueError):
             if app_created:
-                print_failure_logs(app, "80")
+                print_failure_logs(app, "300")
             if client_created:
                 print_failure_logs(client, "30")
             raise

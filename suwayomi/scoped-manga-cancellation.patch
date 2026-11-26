@@ -263,12 +263,7 @@ diff --git a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/Updater
 index 9539fd3c..faa7a45a 100644
 --- a/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/UpdaterTest.kt
 +++ b/server/src/test/kotlin/suwayomi/tachidesk/manga/impl/update/UpdaterTest.kt
-@@ -1,8 +1,11 @@
- package suwayomi.tachidesk.manga.impl.update
- 
- import io.mockk.coEvery
-+import io.mockk.coVerify
- import io.mockk.mockkObject
+@@ -5,4 +5,6 @@
  import io.mockk.unmockkObject
 +import kotlinx.coroutines.CompletableDeferred
 +import kotlinx.coroutines.awaitCancellation
@@ -318,8 +313,8 @@ index 9539fd3c..faa7a45a 100644
 +                mapOf(ids[0] to JobStatus.SKIPPED, ids[1] to JobStatus.SKIPPED, ids[2] to JobStatus.COMPLETE),
 +                status.mangaUpdates.associate { it.manga.id to it.status },
 +            )
-+            coVerify(exactly = 0) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
-+            coVerify(exactly = 1) { Manga.updateMangaAndChapters(ids[2], any(), any()) }
++            io.mockk.coVerify(exactly = 0) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
++            io.mockk.coVerify(exactly = 1) { Manga.updateMangaAndChapters(ids[2], any(), any()) }
 +        }
 +
 +    @Test
@@ -371,13 +366,13 @@ index 9539fd3c..faa7a45a 100644
 +            withTimeout(10_000) {
 +                while (updater.getStatus().finishedJobs != 2) delay(10)
 +            }
-+            coVerify(exactly = 0) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
++            io.mockk.coVerify(exactly = 0) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
 +
 +            updater.addMangasToQueue(listOf(mangas[1]), 1)
 +            withTimeout(10_000) {
 +                while (statusFor(ids[1]) != JobStatus.COMPLETE) delay(10)
 +            }
-+            coVerify(exactly = 1) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
++            io.mockk.coVerify(exactly = 1) { Manga.updateMangaAndChapters(ids[1], any(), any()) }
 +        }
 +
 +    private fun statusFor(mangaId: Int) =
