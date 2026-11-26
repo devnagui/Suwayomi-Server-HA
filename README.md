@@ -131,6 +131,11 @@ uses only the coroutine import context and qualified verification calls.
 The 0.1.14 candidate pins upstream `4081b05f02456ec099c85127dfa5253e968d48a7`,
 rebases navigation callbacks around its new preload/document-script behavior,
 and removes backports now supplied by upstream while retaining their regressions.
+The newer upstream WebView also streams binary JPEG screenshots. The native
+smoke client validates and acknowledges those frames, including fragmentation
+and interleaved pings; the real JavaScript console result is still required.
+Failed Docker probes now include up to 6,000 characters of redacted output,
+instead of hiding the assertion behind a generic exit code.
 Preparation checks the complete approved overlay set against the exact selected
 server commit before either architecture starts. Docker uses that same helper
 and still checks before applying; an incompatible patch remains a hard failure,

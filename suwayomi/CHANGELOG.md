@@ -12,6 +12,9 @@
   architecture build, using the same fail-closed helper inside Docker.
 - Keep all build, CEF, browser, authentication and USB release gates required.
   This candidate does not update or restart an installed Home Assistant app.
+- Handle upstream's binary JPEG WebView frames and acknowledge them during the
+  native CEF smoke test, still requiring the real JavaScript console result.
+- Include bounded, credential-redacted subprocess output in failure diagnostics.
 
 ## 0.1.13
 

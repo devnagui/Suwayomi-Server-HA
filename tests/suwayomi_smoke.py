@@ -50,7 +50,10 @@ def docker(*arguments: str) -> str:
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Docker {arguments[0]} exceeded its 180-second deadline (command details redacted)") from None
     except subprocess.CalledProcessError as error:
-        raise RuntimeError(f"Docker {arguments[0]} failed with exit code {error.returncode} (command details redacted)") from None
+        output = redact(error.output or "")[-6000:]
+        raise RuntimeError(
+            f"Docker {arguments[0]} failed with exit code {error.returncode} (command details redacted)\n{output}"
+        ) from None
 
 
 def print_failure_logs(name: str, lines: str) -> None:

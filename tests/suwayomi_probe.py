@@ -83,12 +83,15 @@ def cef_webview() -> None:
                 raise RuntimeError("CEF WebView upgrade failed")
             headers.extend(part)
         assert headers.startswith(b"HTTP/1.1 101"), "Authenticated CEF WebView upgrade failed"
-        message = json.dumps({
+        def send_frame(opcode: int, payload: bytes) -> None:
+            mask = os.urandom(4)
+            length = bytes((0x80 | len(payload),)) if len(payload) < 126 else b"\xfe" + struct.pack("!H", len(payload))
+            connection.sendall(bytes((0x80 | opcode,)) + length + mask +
+                               bytes(c ^ mask[i % 4] for i, c in enumerate(payload)))
+
+        send_frame(1, json.dumps({
             "type": "loadUrl", "url": "http://172.30.32.2:8191/cef-test", "width": 320, "height": 240,
-        }).encode()
-        mask = os.urandom(4)
-        length = bytes((0x80 | len(message),)) if len(message) < 126 else b"\xfe" + struct.pack("!H", len(message))
-        connection.sendall(b"\x81" + length + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(message)))
+        }).encode())
         deadline = time.monotonic() + 120
 
         def read_exact(length: int) -> bytes:
@@ -105,6 +108,7 @@ def cef_webview() -> None:
             return bytes(result)
 
         text = bytearray()
+        message_opcode = None
         while time.monotonic() < deadline:
             frame = read_exact(2)
             opcode = frame[0] & 0x0F
@@ -119,19 +123,34 @@ def cef_webview() -> None:
             if opcode == 8:
                 raise RuntimeError("CEF WebView closed before executing fixture JavaScript")
             if opcode == 9:
-                mask = os.urandom(4)
-                connection.sendall(bytes((0x8A, 0x80 | len(payload))) + mask +
-                                   bytes(c ^ mask[i % 4] for i, c in enumerate(payload)))
+                if not frame[0] & 0x80 or len(payload) > 125:
+                    raise RuntimeError("CEF WebView returned an invalid ping")
+                send_frame(10, payload)
                 continue
-            if opcode not in (0, 1):
+            if opcode not in (0, 1, 2):
                 raise RuntimeError("CEF WebView returned an unexpected frame")
+            if opcode == 0:
+                if message_opcode is None:
+                    raise RuntimeError("CEF WebView returned a continuation without a message")
+            elif message_opcode is not None:
+                raise RuntimeError("CEF WebView interrupted a fragmented message")
+            else:
+                message_opcode = opcode
             text.extend(payload)
             if len(text) > 8 * 1024 * 1024:
                 raise RuntimeError("CEF WebView message exceeded the fixture size limit")
             if not frame[0] & 0x80:
                 continue
+            if message_opcode == 2:
+                if not text.startswith(b"\xff\xd8") or not text.endswith(b"\xff\xd9"):
+                    raise RuntimeError("CEF WebView returned a binary frame that is not a JPEG")
+                text.clear()
+                message_opcode = None
+                send_frame(1, b'{"type":"frameReceived"}')
+                continue
             event = json.loads(text)
             text.clear()
+            message_opcode = None
             if event.get("type") == "consoleMessage" and event.get("message") == "HA_CEF_JS_RESULT:42":
                 print("PASS: authenticated native CEF WebView loaded local HTML and executed JavaScript", flush=True)
                 return
