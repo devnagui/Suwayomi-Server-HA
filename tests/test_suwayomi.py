@@ -444,6 +444,28 @@ class SuwayomiTests(unittest.TestCase):
         self.assertLess(promotion, record)
         self.assertFalse(any("git commit" in step.get("run", "") for step in jobs["prepare"]["steps"]))
 
+    def test_static_checks_run_once_on_prepared_pins_before_native_matrix(self):
+        workflow = yaml.load((ROOT / ".github" / "workflows" / "suwayomi.yml").read_text(), Loader=yaml.BaseLoader)
+        jobs = workflow["jobs"]
+        prepare = jobs["prepare"]["steps"]
+        all_steps = [step for job in jobs.values() for step in job["steps"]]
+        lint = [step for step in all_steps if step.get("uses") == "frenck/action-app-linter@v2"]
+        units = [step for step in all_steps if "unittest discover" in step.get("run", "")]
+        self.assertEqual(len(lint), 1)
+        self.assertEqual(len(units), 1)
+        self.assertEqual(lint[0]["with"]["path"], "suwayomi")
+        pins = next(index for index, step in enumerate(prepare) if step.get("id") == "pins")
+        archive = next(index for index, step in enumerate(prepare)
+                       if step.get("name") == "Preserve the exact prepared source for both architectures")
+        for step in (lint[0], units[0]):
+            self.assertIn(step, prepare)
+            self.assertEqual(step["if"], "steps.pins.outputs.build == 'true'")
+            self.assertLess(pins, prepare.index(step))
+            self.assertLess(prepare.index(step), archive)
+        checkout = next(step for step in prepare if step.get("uses") == "actions/checkout@v7")
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
+        self.assertEqual(jobs["build"]["needs"], "prepare")
+
     def test_source_pin_helper_is_complete_and_rejects_non_increasing_versions(self):
         with tempfile.TemporaryDirectory() as temporary:
             app = Path(temporary)

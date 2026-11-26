@@ -117,6 +117,12 @@ Each Gradle attempt is limited to eight minutes, with short two/four-second
 delays between retries; a timed-out process fails instead of being retried.
 
 Prepare/build/publication jobs are limited to ten/forty/fifteen minutes.
+The HA manifest linter and pure Python packaging regressions run once against
+the prepared pins, before archiving the candidate and starting either native
+build. Preparation does not persist checkout credentials into the tested tree.
+JVM, Chromium/browser, CEF, authentication, TLS, migration, USB/restart and
+live stable/preview WebUI gates remain required on both architectures.
+This removes duplicate static executions, not test coverage or release gates.
 Superseded PR runs can still be cancelled, but main/release runs are not cancelled
 mid-publication by a newer push or schedule. Both architecture gates must pass
 before release metadata is committed. Registry writes for the two architecture
