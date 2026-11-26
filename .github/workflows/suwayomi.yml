@@ -189,25 +189,41 @@ jobs:
           cache-from: type=gha,scope=suwayomi-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=suwayomi-${{ matrix.arch }}
       - name: Verify CEF JavaScript and USB library persistence across restart
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for attempt in 1 2 3; do
             python build/tests/suwayomi_smoke.py suwayomi-ha:test --cef --usb-storage
           done
       - name: Verify ingress, browser iframe, direct authentication and API
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser
       - name: Verify mounted USB storage and real library persistence
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --usb-storage
       - name: Verify runtime WebUI downloads and preserved ingress
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --webui-channel preview --browser --usb-storage
       - name: Verify direct HTTPS, configured certificate and renewal reload
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --tls --usb-storage
       - name: Verify 0.1.4 Basic-auth migration to native UI_LOGIN
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage
           --migration-from ghcr.io/devnagui/suwayomi-server-ha/suwayomi-${{ matrix.arch }}:0.1.4
       - name: Verify intentional native authentication failure is explicit and fail closed
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --browser --usb-storage --auth-failure
       - name: Verify stable WebUI native login and ingress compatibility
+        env:
+          HA_CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python build/tests/suwayomi_smoke.py suwayomi-ha:test --webui-channel stable --browser --usb-storage
       - uses: docker/login-action@v4
         if: needs.prepare.outputs.publish == 'true'

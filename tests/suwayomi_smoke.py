@@ -42,6 +42,16 @@ def redact(message: str) -> str:
     return re.sub(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", "<redacted-jwt>", message)
 
 
+def ci_github_environment() -> list[str]:
+    token = os.environ.get("HA_CI_GITHUB_TOKEN")
+    if token is None:
+        return []
+    if not token:
+        raise RuntimeError("HA_CI_GITHUB_TOKEN is empty")
+    remember_secrets({"accessToken": token})
+    return ["--env", "HA_CI_GITHUB_TOKEN"]
+
+
 def docker(*arguments: str) -> str:
     try:
         return subprocess.check_output(
@@ -204,6 +214,7 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.tls and arguments.browser:
         parser.error("TLS smoke uses a verified private test CA; run browser/iframe checks separately without --tls")
+    github_environment = ci_github_environment()
     identifier = "suwayomi-check-" + uuid.uuid4().hex[:12]
     platform = "linux/" + docker("image", "inspect", "--format", "{{.Architecture}}", arguments.image)
     app = identifier + "-app"
@@ -310,7 +321,7 @@ def main() -> None:
                 "--publish", "127.0.0.1::4567", "--publish", "127.0.0.1::8080",
                 "--mount", f"type=volume,source={volume},target=/data",
                 "--mount", f"type=bind,source={options_path},target=/data/options.json,readonly",
-                *storage_mounts, *tls_mounts, arguments.image,
+                *github_environment, *storage_mounts, *tls_mounts, arguments.image,
             )
             app_created = True
             direct_port = docker("port", app, "4567/tcp").rsplit(":", 1)[1]

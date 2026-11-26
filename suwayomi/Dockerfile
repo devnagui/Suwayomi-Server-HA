@@ -13,7 +13,7 @@ RUN git clone https://github.com/Suwayomi/Suwayomi-Server.git . \
     && test "$(git rev-parse HEAD)" = "$SOURCE_REF"
 COPY build_source.py /source/build_source.py
 COPY gradle_retry.py /gradle_retry.py
-COPY bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch android-evaluation-semantics.patch /source/
+COPY bundled-webui-version.patch scoped-manga-cancellation.patch webview-navigation-snapshot.patch android-evaluation-semantics.patch ci-github-metadata.patch /source/
 RUN python3 /source/build_source.py --apply-patches /source
 RUN python3 /source/build_source.py --pin-webui /source "$WEBUI_REF" "$WEBUI_MIN_SERVER" "$WEBUI_SHA256"
 RUN --mount=type=cache,target=/root/.gradle \
@@ -25,6 +25,7 @@ RUN --mount=type=cache,target=/root/.gradle \
        :server:test --tests suwayomi.tachidesk.manga.impl.update.UpdaterTest \
        --tests suwayomi.tachidesk.graphql.UpdateMutationTest \
        --tests suwayomi.tachidesk.graphql.HABundledWebUIVersionTest \
+       --tests suwayomi.tachidesk.server.util.HAGithubMetadataRequestTest \
        :server:downloadWebUI :server:shadowJar
 RUN python3 /source/build_source.py /source /output "$WEBUI_REF" "$WEBUI_SHA256"
 
