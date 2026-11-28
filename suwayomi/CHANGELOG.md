@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15
+
+- Automatically repackage [upstream Suwayomi server 4081b05f0245](https://github.com/Suwayomi/Suwayomi-Server/commit/4081b05f02456ec099c85127dfa5253e968d48a7) with verified compatible WebUI r3604.
+- Publish only after amd64 and ARM64 build, ingress/API/browser and USB library-persistence tests pass.
+
 ## 0.1.14
 
 - Repackage upstream server `4081b05f02456ec099c85127dfa5253e968d48a7`
